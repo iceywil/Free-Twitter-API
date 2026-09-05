@@ -103,18 +103,24 @@ export class V11Client {
     });
   }
 
-  /** Uploads a profile image. `image` is the base64-encoded picture bytes. */
-  updateProfileImage(imageBase64: string) {
+  /**
+   * Points the profile image at an already-uploaded media id.
+   *
+   * The base64 `image` parameter belongs to the OAuth 1.0a API and is not
+   * accepted for a cookie session; the web client uploads through
+   * `upload.x.com` first and sends the id, which is what this does.
+   */
+  updateProfileImage(mediaId: string) {
     return this.base.post(V11Endpoint.UPDATE_PROFILE_IMAGE, {
-      data: { image: imageBase64 },
+      data: { media_id: mediaId, skip_status: '1', return_user: 'true' },
       headers: this.formHeaders,
     });
   }
 
-  /** Uploads a profile banner. `banner` is the base64-encoded image bytes. */
-  updateProfileBanner(bannerBase64: string) {
+  /** The same, for the banner. Offsets left unset means "use the whole image". */
+  updateProfileBanner(mediaId: string) {
     return this.base.post(V11Endpoint.UPDATE_PROFILE_BANNER, {
-      data: { banner: bannerBase64 },
+      data: { media_id: mediaId, skip_status: '1' },
       headers: this.formHeaders,
     });
   }

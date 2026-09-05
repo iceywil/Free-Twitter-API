@@ -43,8 +43,15 @@ export const V11Endpoint = {
   // used as a best-effort fallback when GraphQL SearchTimeline is refused.
   SEARCH_ADAPTIVE: `https://${DOMAIN}/i/api/2/search/adaptive.json`,
   // Profile-editing endpoints.
-  UPDATE_PROFILE: `https://api.${DOMAIN}/1.1/account/update_profile.json`,
-  UPDATE_PROFILE_IMAGE: `https://api.${DOMAIN}/1.1/account/update_profile_image.json`,
-  UPDATE_PROFILE_BANNER: `https://api.${DOMAIN}/1.1/account/update_profile_banner.json`,
-  REMOVE_PROFILE_BANNER: `https://api.${DOMAIN}/1.1/account/remove_profile_banner.json`,
+  /*
+   * On `x.com/i/api`, not `api.x.com`. The `api.` host serves the OAuth 1.0a
+   * API, which does not route these for a cookie session — it answers
+   * `{"code":34,"message":"Sorry, that page does not exist"}`, which reads as
+   * a dead endpoint when the session is perfectly good. Every other
+   * cookie-authenticated route in this file is on `x.com/i/api` already.
+   */
+  UPDATE_PROFILE: `https://${DOMAIN}/i/api/1.1/account/update_profile.json`,
+  UPDATE_PROFILE_IMAGE: `https://${DOMAIN}/i/api/1.1/account/update_profile_image.json`,
+  UPDATE_PROFILE_BANNER: `https://${DOMAIN}/i/api/1.1/account/update_profile_banner.json`,
+  REMOVE_PROFILE_BANNER: `https://${DOMAIN}/i/api/1.1/account/remove_profile_banner.json`,
 } as const;

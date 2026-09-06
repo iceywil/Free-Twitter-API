@@ -1034,15 +1034,15 @@ export class Client {
    * await client.updateProfileImage('avatar.png');
    */
   async updateProfileImage(source: string | Buffer | Uint8Array): Promise<HttpResponse> {
-    const mediaId = await this.uploadMedia(source);
-    const [, response] = await this.v11.updateProfileImage(mediaId);
+    const binary = typeof source === 'string' ? await readFile(source) : Buffer.from(source);
+    const [, response] = await this.v11.updateProfileImage(binary.toString('base64'));
     return response;
   }
 
   /** Sets the profile banner from a file path or raw image bytes. */
   async updateProfileBanner(source: string | Buffer | Uint8Array): Promise<HttpResponse> {
-    const mediaId = await this.uploadMedia(source);
-    const [, response] = await this.v11.updateProfileBanner(mediaId);
+    const binary = typeof source === 'string' ? await readFile(source) : Buffer.from(source);
+    const [, response] = await this.v11.updateProfileBanner(binary.toString('base64'));
     return response;
   }
 

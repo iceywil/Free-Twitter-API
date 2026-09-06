@@ -96,31 +96,31 @@ export class V11Client {
     return this.base.post(V11Endpoint.ONBOARDING_SSO_INIT, { json: { provider }, headers });
   }
 
+  /**
+   * Name, bio, location and website.
+   *
+   * `displayNameMaxLength` is what the web client sends and the endpoint
+   * expects to see alongside a name; it is not optional in practice.
+   */
   updateProfile(fields: Record<string, string>) {
     return this.base.post(V11Endpoint.UPDATE_PROFILE, {
-      data: fields,
+      data: { displayNameMaxLength: '50', ...fields },
       headers: this.formHeaders,
     });
   }
 
-  /**
-   * Points the profile image at an already-uploaded media id.
-   *
-   * The base64 `image` parameter belongs to the OAuth 1.0a API and is not
-   * accepted for a cookie session; the web client uploads through
-   * `upload.x.com` first and sends the id, which is what this does.
-   */
-  updateProfileImage(mediaId: string) {
+  /** Uploads a profile image. `image` is the base64-encoded picture bytes. */
+  updateProfileImage(imageBase64: string) {
     return this.base.post(V11Endpoint.UPDATE_PROFILE_IMAGE, {
-      data: { media_id: mediaId, skip_status: '1', return_user: 'true' },
+      data: { image: imageBase64 },
       headers: this.formHeaders,
     });
   }
 
-  /** The same, for the banner. Offsets left unset means "use the whole image". */
-  updateProfileBanner(mediaId: string) {
+  /** Uploads a profile banner. `banner` is the base64-encoded image bytes. */
+  updateProfileBanner(bannerBase64: string) {
     return this.base.post(V11Endpoint.UPDATE_PROFILE_BANNER, {
-      data: { media_id: mediaId, skip_status: '1' },
+      data: { banner: bannerBase64 },
       headers: this.formHeaders,
     });
   }

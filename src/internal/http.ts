@@ -199,12 +199,31 @@ export class HttpSession {
 
   // -- cookies ---------------------------------------------------------------
 
-  /** All cookies in the jar as a flat `name -> value` map. */
+  /**
+   * All cookies in the jar as a flat `name -> value` map.
+   *
+   * A name can exist for more than one domain: `setCookies` seeds both
+   * `.x.com` and `.twitter.com`, while x.com rotates `ct0` on its own domain
+   * only — so the jar ends up holding a fresh value and a stale one under the
+   * same name. The x.com value wins here, and otherwise the first match does,
+   * which is what `getCookie` has always returned.
+   *
+   * This used to be last-one-wins, silently disagreeing with `getCookie`. A
+   * caller persisting this map to reuse the session later could store the
+   * stale `ct0` while the requests it had just made used the fresh one — a
+   * session that worked until it was next loaded from storage.
+   */
   getCookies(): Record<string, string> {
     const result: Record<string, string> = {};
+    const authoritative = new Set<string>();
+
     for (const cookie of this.allCookies()) {
+      const fromX = (cookie.domain ?? '').includes('x.com');
+      if (result[cookie.key] !== undefined && !(fromX && !authoritative.has(cookie.key))) continue;
       result[cookie.key] = cookie.value;
+      if (fromX) authoritative.add(cookie.key);
     }
+
     return result;
   }
 

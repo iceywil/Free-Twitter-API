@@ -5,10 +5,15 @@
  *
  */
 
-export const VERSION = '0.1.0';
+export const VERSION = '1.0.0';
 
 // -- clients -----------------------------------------------------------------
 export { Client, type ClientOptions, type LoginOptions } from './client/client.js';
+export {
+  parseAccountRecord,
+  accountSessionCookies,
+  type AccountRecord,
+} from './client/accountRecord.js';
 export { GQLClient, Endpoint, type ApiResult, type GQLBase } from './client/gql.js';
 export { V11Client, V11Endpoint, type V11Base } from './client/v11.js';
 export {

@@ -5,7 +5,7 @@ import { open } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { TOTP } from 'otpauth';
 import type { CaptchaSolver } from '../captcha/base.js';
-import { DOMAIN, TOKEN } from '../constants.js';
+import { DEFAULT_USER_AGENT, DOMAIN, TOKEN } from '../constants.js';
 import {
   AccountLocked,
   AccountSuspended,
@@ -68,9 +68,6 @@ import { GQLClient, type ApiResult } from './gql.js';
 import { NativeLoginFlow } from './nativeLogin.js';
 import { V11Client, V11Endpoint } from './v11.js';
 
-const DEFAULT_USER_AGENT =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
-
 export interface ClientOptions {
   /** The language code to use in API requests. */
   language?: string;
@@ -114,6 +111,28 @@ export interface LoginOptions {
    * sent to the API. Enabling this may reduce the risk of account suspension.
    */
   enableUiMetrics?: boolean;
+  /**
+   * How to obtain the session.
+   *
+   * - `'auto'` (default) runs the hybrid flow, then a full browser login,
+   *   stopping at the first that works. It does not attempt the fully-native
+   *   flow, which x.com reliably refuses. The optional `playwright` dependency
+   *   is loaded only when login actually runs (a cached `cookiesFile` skips it).
+   * - `'hybrid'` runs every HTTP request from Node, but mints each Castle token
+   *   in a real (headless) browser — the browser does nothing but mint. A
+   *   browser-minted token is accepted where a sandbox one is not, so this is
+   *   the lightest path that works end to end. Needs `playwright`.
+   * - `'browser'` drives the whole login form in a real browser. Needs
+   *   `playwright`.
+   * - `'native'` never launches a browser. Currently refused by x.com (the
+   *   sandbox-minted token is judged weaker than a real browser's); kept for
+   *   experimentation and in case that changes. See docs/native-login.md.
+   */
+  strategy?: 'auto' | 'native' | 'hybrid' | 'browser';
+  /** Forwarded to the browser fallback: run without a visible window. */
+  headless?: boolean;
+  /** Forwarded to the browser fallback: persistent profile directory. */
+  profileDir?: string;
 }
 
 /**
@@ -146,6 +165,8 @@ export class Client {
   private readonly promptFn: (message: string) => Promise<string>;
   /** Timezone sent with login requests; can be overridden via options. */
   loginTimezone: string | undefined;
+  /** Suppress advisory warnings, e.g. when the login falls back to a browser. */
+  readonly silent: boolean;
 
   constructor(options: ClientOptions = {}) {
     this.http = new HttpSession({
@@ -163,6 +184,7 @@ export class Client {
     this.agent = options.userAgent ?? DEFAULT_USER_AGENT;
     this.promptFn = options.prompt ?? defaultPrompt;
     this.loginTimezone = options.loginTimezone;
+    this.silent = options.silent ?? false;
 
     this.gql = new GQLClient(this);
     this.v11 = new V11Client(this);
@@ -346,30 +368,167 @@ export class Client {
       return undefined;
     }
 
-    // x.com retired the onboarding flow upstream drives; use the current
-    // native jfapi flow, which needs a Castle device token and a transaction id
-    // (both generated natively). The legacy Flow path below is unreachable on
-    // today's endpoints and kept only as a reference.
-    const guestToken = await this.getGuestToken();
+    const strategy = options.strategy ?? 'auto';
 
+    const finish = async (cookies: Record<string, any>): Promise<Record<string, any>> => {
+      this.setCookies(cookies, true);
+      this.currentUserId = null;
+      if (cookiesFile) await this.saveCookies(cookiesFile);
+      void enableUiMetrics;
+      return cookies;
+    };
+
+    // Each step in the `auto` chain is tried in turn; a caller who names a
+    // strategy gets exactly that one.
+    //
+    // `auto` deliberately skips the fully-native step: x.com reliably refuses
+    // the sandbox-minted token, so trying it first would spend a doomed
+    // device-assessment request (and erode the IP's standing) before every
+    // login. Hybrid mints the token in a real browser — which is what makes it
+    // accepted — and full browser is the fallback for flows hybrid cannot drive
+    // (e.g. an interactive challenge). `strategy: 'native'` stays available for
+    // anyone who wants the browserless attempt regardless.
+    const chain: Array<'native' | 'hybrid' | 'browser'> =
+      strategy === 'auto' ? ['hybrid', 'browser'] : [strategy];
+
+    let lastError: unknown;
+    for (const step of chain) {
+      try {
+        if (step === 'native') return await finish(await this.nativeLogin(options));
+        if (step === 'hybrid') return await finish(await this.hybridLogin(options));
+        return await finish(await this.browserLogin(options, lastError));
+      } catch (error) {
+        lastError = error;
+        // A refused attempt leaves half-built guest state behind; the next step
+        // must start clean rather than inherit a device the server judged.
+        this.http.clearCookies();
+        if (!this.silent && step !== 'browser' && strategy === 'auto') {
+          console.warn(
+            `[free-twitter-api] ${step} login failed (${(error as Error).message}) — trying next strategy.`
+          );
+        }
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new TwitterException('Login failed for every strategy.');
+  }
+
+  /**
+   * The hybrid path: native HTTP throughout, but each Castle token is minted in
+   * a real headless browser. A browser-minted token is accepted where a sandbox
+   * one is refused, so this logs in with only a token-minting browser rather
+   * than driving the whole form. Playwright is loaded lazily.
+   */
+  private async hybridLogin(options: LoginOptions): Promise<Record<string, any>> {
+    let BrowserCastleOracle: typeof import('../internal/castleOracle.js').BrowserCastleOracle;
+    try {
+      ({ BrowserCastleOracle } = await import('../internal/castleOracle.js'));
+    } catch {
+      throw new TwitterException(
+        "The hybrid strategy needs the optional 'playwright' dependency. " +
+          'Install it with: npm install playwright'
+      );
+    }
+
+    const oracle = new BrowserCastleOracle({
+      headless: options.headless ?? true,
+      account: options.authInfo1,
+      proxy: this.proxy ?? undefined,
+    });
+    try {
+      // Prime the oracle so its guest token and cookies are available, and use
+      // them for the native flow — the browser-minted token is bound to that
+      // browser's device/session, so the request must match it.
+      await oracle.createRequestToken();
+      const browserCookies = await oracle.cookies();
+      this.setCookies(browserCookies, true);
+
+      const nativeFlow = await NativeLoginFlow.create(this.http, {
+        authInfo1: options.authInfo1,
+        authInfo2: options.authInfo2,
+        password: options.password,
+        totpSecret: options.totpSecret,
+        timezone: this.loginTimezone,
+        userAgent: this.agent,
+        guestToken: oracle.guestToken || (await this.getGuestToken()),
+        transactionId: async (method: string, path: string) =>
+          this.generateTransactionId(method, path),
+        prompt: this.promptFn,
+        castleSource: oracle,
+      } as any);
+      const cookies = await nativeFlow.run();
+
+      // The oracle's `cf_clearance` is bound to the browser's TLS fingerprint,
+      // so carrying it into Node's own requests makes Cloudflare reject them
+      // (verified: a 403 on the first API call that clears the moment these are
+      // dropped). The session cookies are what matter; the native client passes
+      // Cloudflare on its own.
+      for (const name of ['cf_clearance', '__cf_bm', '__cuid', 'g_state']) delete cookies[name];
+      return cookies;
+    } finally {
+      await oracle.close();
+    }
+  }
+
+  /**
+   * The browserless path: x.com's current jfapi flow, with a Castle device
+   * token and transaction id both minted natively.
+   */
+  private async nativeLogin(options: LoginOptions): Promise<Record<string, any>> {
+    const guestToken = await this.getGuestToken();
     const nativeFlow = await NativeLoginFlow.create(this.http, {
-      authInfo1,
-      authInfo2,
-      password,
-      totpSecret,
+      authInfo1: options.authInfo1,
+      authInfo2: options.authInfo2,
+      password: options.password,
+      totpSecret: options.totpSecret,
       timezone: this.loginTimezone,
       userAgent: this.agent,
       guestToken,
       transactionId: async (method: string, path: string) => this.generateTransactionId(method, path),
       prompt: this.promptFn,
     } as any);
-    const cookies = await nativeFlow.run();
-    this.setCookies(cookies, true);
-    this.currentUserId = null;
-    if (cookiesFile) await this.saveCookies(cookiesFile);
-    void enableUiMetrics;
-    return cookies;
+    return nativeFlow.run();
+  }
 
+  /**
+   * The fallback: drive a real browser once and keep its cookies.
+   *
+   * Imported dynamically so `playwright` stays genuinely optional — a caller
+   * whose native login succeeds never loads it.
+   */
+  private async browserLogin(
+    options: LoginOptions,
+    nativeError?: unknown
+  ): Promise<Record<string, any>> {
+    let browserLogin: typeof import('../browser/login.js').browserLogin;
+    try {
+      ({ browserLogin } = await import('../browser/login.js'));
+    } catch {
+      throw new TwitterException(
+        'The native login was refused and the browser fallback is unavailable. ' +
+          "Install the optional dependency with: npm install playwright. " +
+          (nativeError instanceof Error ? `Native login said: ${nativeError.message}` : '')
+      );
+    }
+
+    if (!this.silent && nativeError instanceof Error) {
+      console.warn(
+        `[free-twitter-api] Native login was refused (${nativeError.message}) — ` +
+          'falling back to a real browser.'
+      );
+    }
+
+    const result = await browserLogin({
+      authInfo1: options.authInfo1,
+      authInfo2: options.authInfo2,
+      password: options.password,
+      totpSecret: options.totpSecret,
+      headless: options.headless,
+      profileDir: options.profileDir,
+      onVerificationCode: (prompt: string) => this.promptFn(prompt),
+    });
+    return result.cookies;
   }
 
   async logout(): Promise<HttpResponse> {

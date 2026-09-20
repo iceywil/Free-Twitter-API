@@ -5,6 +5,10 @@ dist/
 .env.*
 !.env.example
 cookies.json
+test.txt
+scripts/do-login.ts
+scripts/.native-diff.json
+scripts/.wire-diff.json
 *.tsbuildinfo
 coverage/
 
@@ -12,6 +16,7 @@ coverage/
 scripts/dbg*.ts
 
 # captured browser request (contains session secrets)
+scripts/.login-capture/
 scripts/.capture.json
 scripts/.intercept.jsonl
 scripts/.storage.json
@@ -30,3 +35,17 @@ scripts/.explore-sidebar.json
 scripts/.castle.js
 scripts/.minted-token.txt
 scripts/.orig-avatar
+scripts/.login-capture-headless/
+scripts/.headless-diff.json
+scripts/.token-decode.json
+scripts/.token-plaintext.json
+scripts/.browser-signals.json
+scripts/.starve.json
+scripts/.session-newacct.json
+scripts/.castle-probes.json
+
+# loose dev helper (feature lives in src/browser/chromeCookies.ts)
+scripts/get-chrome-cookies.ts
+
+# superseded by deviceProfile.ts (regenerate via scripts/dbg-harvest-profile.ts)
+src/internal/deviceProfile.json

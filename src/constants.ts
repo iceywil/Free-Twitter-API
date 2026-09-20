@@ -3,6 +3,19 @@ export const TOKEN = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puT
 
 export const DOMAIN = "x.com";
 
+/**
+ * The User-Agent every part of the library presents.
+ *
+ * It must be a Chrome UA, and it must be the *same* string everywhere. The
+ * Castle.io SDK that mints the login device token runs Chrome-targeted code
+ * against a fake `navigator` seeded from this value, so pairing it with a
+ * Safari UA produces a token describing a browser that cannot exist — a
+ * contradiction Castle scores against. Defining it once is what keeps the HTTP
+ * headers and the device token telling the same story.
+ */
+export const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
+
 export const FEATURES: Record<string, boolean> = {
   "creator_subscriptions_tweet_preview_api_enabled": true,
   "c9s_tweet_anatomy_moderator_badge_enabled": true,

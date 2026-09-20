@@ -8,14 +8,39 @@
  * and returns the resulting cookies, after which the plain {@link Client} runs
  * the entire (ungated) API from Node with no browser.
  *
+ * Castle scores the device, not just the credentials, so the browser has to
+ * look like somebody's actual browser. See {@link stealthContextOptions} for
+ * the measured differences this closes. Three things matter most:
+ *
+ * 1. The locally installed Chrome, not bundled Chromium — Chromium's WebGL
+ *    vendor, `userAgentData` brands and plugin set are all visibly not Chrome.
+ * 2. A persistent profile, one per account, so repeat logins come from a device
+ *    Castle has seen before instead of a new one each time — while separate
+ *    accounts stay on separate devices.
+ * 3. A corrected headless mode, or headed. Plain headless is refused at
+ *    `begin_login`; `headless: true` applies the fixes that make it pass. See
+ *    docs/native-login.md for the controlled comparison.
+ *
  * Playwright is an OPTIONAL peer dependency — install it only if you use this
  * module:
  *
  * ```sh
  * npm install playwright
- * npx playwright install chromium
  * ```
+ *
+ * Note that `npx playwright install chromium` is *not* wanted here: this drives
+ * the Google Chrome already installed on the machine.
  */
+
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  PROFILE_ROOT,
+  profileDirFor,
+  stealthContextOptions,
+  typeLikeHuman,
+  pause,
+} from './stealth.js';
 
 export interface BrowserLoginOptions {
   /** Username, email, or phone number. */
@@ -27,14 +52,36 @@ export interface BrowserLoginOptions {
   totpSecret?: string;
   /** Called when a verification code is needed and no `totpSecret` is set. */
   onVerificationCode?: (prompt: string) => Promise<string>;
-  /** Show the browser window. Defaults to headless. */
-  headed?: boolean;
-  /** Use the locally installed Google Chrome instead of bundled Chromium. */
-  useChrome?: boolean;
-  /** Milliseconds to wait for each navigation/selector. Defaults to 30000. */
+  /**
+   * Persistent Chrome profile directory. Reused across runs so the device stays
+   * recognisable to Castle. Defaults to a directory of this account's own under
+   * `~/.free-twitter-api/profiles/`, so separate accounts never share a device
+   * identity.
+   */
+  profileDir?: string;
+  /**
+   * Reuse one profile for every account instead of one per account. Off by
+   * default, and best left off: a shared profile means a shared device identity
+   * and cookie jar, which is how separate accounts get correlated.
+   */
+  sharedProfile?: boolean;
+  /**
+   * Run the browser without a visible window. Defaults to false.
+   *
+   * Plain headless Chrome is refused at `begin_login` — it reports
+   * `HeadlessChrome` in the user agent while its own `sec-ch-ua` hints say
+   * `Google Chrome`, and it loses the Retina scale factor and real screen
+   * size. Setting this corrects all three (see `headlessOverrides`), and a
+   * cold-start headless login then succeeds. Headed remains the default as the
+   * better-tested path.
+   */
+  headless?: boolean;
+  /** Milliseconds to wait for each navigation/selector. Defaults to 60000. */
   timeout?: number;
   /** Proxy URL, forwarded to the browser. */
   proxy?: string;
+  /** Path to a Chrome binary, when it is not in the standard location. */
+  executablePath?: string;
 }
 
 export interface BrowserLoginResult {
@@ -44,6 +91,8 @@ export interface BrowserLoginResult {
   authToken?: string;
   /** The `ct0` (CSRF) cookie, if present. */
   ct0?: string;
+  /** True when the profile already held a session and no form was driven. */
+  reusedSession: boolean;
 }
 
 // Loaded lazily so the package does not hard-depend on Playwright.
@@ -55,7 +104,7 @@ async function loadPlaywright(): Promise<PlaywrightModule> {
   } catch {
     throw new Error(
       "browserLogin requires the optional 'playwright' dependency. " +
-        'Install it with: npm install playwright && npx playwright install chromium'
+        'Install it with: npm install playwright'
     );
   }
 }
@@ -67,6 +116,10 @@ async function totpNow(secret: string): Promise<string> {
 
 /**
  * Logs in through a real browser and returns the session cookies.
+ *
+ * The browser profile persists, so the common case after the first run is that
+ * the session is still valid and no login happens at all
+ * (`reusedSession: true`).
  *
  * @example
  * import { browserLogin } from 'free-twitter-api/browser';
@@ -84,39 +137,45 @@ async function totpNow(secret: string): Promise<string> {
  */
 export async function browserLogin(options: BrowserLoginOptions): Promise<BrowserLoginResult> {
   const { chromium } = await loadPlaywright();
-  const timeout = options.timeout ?? 30_000;
+  const timeout = options.timeout ?? 60_000;
+  // One profile per account unless told otherwise; see profileDirFor.
+  const profileDir =
+    options.profileDir ??
+    (options.sharedProfile ? join(PROFILE_ROOT, '_shared') : profileDirFor(options.authInfo1));
+  mkdirSync(profileDir, { recursive: true });
 
-  const browser = await chromium.launch({
-    headless: !options.headed,
-    ...(options.useChrome ? { channel: 'chrome' } : {}),
-    ...(options.proxy ? { proxy: { server: options.proxy } } : {}),
-  });
+  // `headless` must go *through* stealthContextOptions, not be spread over the
+  // top of it: the corrections that make headless survive login (user agent,
+  // screen, device pixel ratio) are applied there, and setting the flag
+  // afterwards would silently get the plain, detected variant.
+  const context = await chromium.launchPersistentContext(profileDir, {
+    ...stealthContextOptions({
+      proxy: options.proxy,
+      headless: options.headless,
+      executablePath: options.executablePath,
+    }),
+    ...(options.executablePath ? { executablePath: options.executablePath } : {}),
+  } as Parameters<typeof chromium.launchPersistentContext>[1]);
 
   try {
-    const context = await browser.newContext({ locale: 'en-US' });
-    const page = await context.newPage();
+    const page = context.pages()[0] ?? (await context.newPage());
     page.setDefaultTimeout(timeout);
 
-    await page.goto('https://x.com/i/flow/login', { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(2500);
-    await dismissCookieBanner(page);
-
-    // The current jfapi flow shows username and password on one form.
-    const identifier = await firstVisible(
-      page,
-      ['input[name="username_or_email"]', 'input[name="text"]', 'input[autocomplete~="username"]'],
-      timeout
-    );
-    if (!identifier) throw new Error('Username field never appeared; the login flow may have changed.');
-    await identifier.fill(options.authInfo1);
-
-    const pw = await firstVisible(page, ['input[name="password"]', 'input[type="password"]'], timeout);
-    if (pw) await pw.fill(options.password);
+    // The profile may still hold a valid session from a previous run.
+    if (await readCookies(context).then((c) => Boolean(c.auth_token))) {
+      const cookies = await readCookies(context);
+      return {
+        cookies,
+        authToken: cookies.auth_token,
+        ct0: cookies.ct0,
+        reusedSession: true,
+      };
+    }
 
     // x.com's login errors arrive in the onboarding action responses rather
     // than the DOM, so capture them to report something actionable.
     const actionErrors: string[] = [];
-    page.on('response', async (res: any) => {
+    page.on('response', async (res: Response) => {
       if (!/jfapi\/onboarding\/web\/actions/.test(res.url())) return;
       const body = await res.text().catch(() => '');
       for (const m of body.matchAll(/[A-Z][^\u0000-\u001f]{15,160}?[.!]/g)) {
@@ -127,28 +186,51 @@ export async function browserLogin(options: BrowserLoginOptions): Promise<Browse
       }
     });
 
-    await clickContinue(page);
-    await page.waitForTimeout(2500);
+    await page.goto('https://x.com/i/flow/login', { waitUntil: 'domcontentloaded' });
+    await pause(1800, 3200);
+    await dismissCookieBanner(page);
 
-    // A second identifier or password may be requested on a follow-up step
-    // (older/variant flows), plus any 2FA / email challenge.
+    // The flow is two steps — username, then password — mirroring the
+    // `begin_login` / `login_enter_password` actions it posts behind the
+    // scenes. Both steps are in the DOM from the start, and the inactive one is
+    // marked `inert`, so every field has to be checked for that: Playwright
+    // considers an inert input visible, and clicking it hangs until the timeout
+    // because the active step's field sits on top of it.
+    const identifier = await firstInteractable(
+      page,
+      ['input[name="username_or_email"]', 'input[name="text"]', 'input[autocomplete~="username"]'],
+      timeout
+    );
+    if (!identifier) throw new Error('Username field never appeared; the login flow may have changed.');
+    await typeLikeHuman(identifier, options.authInfo1);
+    await pause(300, 700);
+
+    await clickContinue(page);
+    await pause(2200, 3500);
+
+    const pw = await firstInteractable(
+      page,
+      ['input[name="password"]', 'input[type="password"]'],
+      timeout
+    );
     if (!pw) {
-      const pw2 = await firstVisible(page, ['input[name="password"]', 'input[type="password"]'], 6000);
-      if (pw2) {
-        await pw2.fill(options.password);
-        await clickContinue(page);
-        await page.waitForTimeout(2000);
-      }
+      throw new Error(
+        actionErrors.length > 0
+          ? `x.com rejected the username: ${actionErrors.join(' | ')}`
+          : 'The password step never became active; the login flow may have changed.'
+      );
     }
+    await typeLikeHuman(pw, options.password);
+    await pause(300, 800);
+    await clickContinue(page);
+    await pause(2200, 3500);
+
     await handleChallenge(page, options);
 
     // Success: auth_token becomes available.
     await waitForCookie(context, 'auth_token', timeout);
 
-    const cookies: Record<string, string> = {};
-    for (const c of await context.cookies()) {
-      if (c.domain.includes('x.com') || c.domain.includes('twitter.com')) cookies[c.name] = c.value;
-    }
+    const cookies = await readCookies(context);
 
     if (!cookies.auth_token) {
       if (actionErrors.length > 0) {
@@ -156,13 +238,14 @@ export async function browserLogin(options: BrowserLoginOptions): Promise<Browse
       }
       throw new Error(
         'Login did not yield an auth_token cookie. No error was reported, so the ' +
-          'flow may have changed, or a challenge is pending — retry with `headed: true` to watch it.'
+          'flow may have changed, or a challenge is pending — rerun with the window ' +
+          'visible to watch it.'
       );
     }
 
-    return { cookies, authToken: cookies.auth_token, ct0: cookies.ct0 };
+    return { cookies, authToken: cookies.auth_token, ct0: cookies.ct0, reusedSession: false };
   } finally {
-    await browser.close();
+    await context.close();
   }
 }
 
@@ -170,6 +253,16 @@ export async function browserLogin(options: BrowserLoginOptions): Promise<Browse
 type Page = any;
 type BrowserContext = any;
 type Locator = any;
+type Response = any;
+
+/** Every x.com/twitter.com cookie the context currently holds. */
+async function readCookies(context: BrowserContext): Promise<Record<string, string>> {
+  const cookies: Record<string, string> = {};
+  for (const c of await context.cookies(['https://x.com', 'https://twitter.com'])) {
+    cookies[c.name] = c.value;
+  }
+  return cookies;
+}
 
 /**
  * Submits the current step.
@@ -179,24 +272,45 @@ type Locator = any;
  * loose /continue/i match hits one of those and derails into signup.
  */
 async function clickContinue(page: Page): Promise<void> {
-  // The page renders duplicate forms, one of them hidden, so pick the first
-  // submit button that is actually visible rather than the first in the DOM.
+  // The page holds a form per step, the inactive one inert, so pick the first
+  // submit button that is actually live rather than the first in the DOM.
   const submits = page.locator('form button[type="submit"]');
   const total = await submits.count();
   for (let i = 0; i < total; i += 1) {
     const candidate = submits.nth(i);
-    if (await candidate.isVisible().catch(() => false)) {
-      await candidate.click();
+    if (await isInteractable(candidate)) {
+      await clickLikeHuman(page, candidate);
       return;
     }
   }
   for (const name of [/^continue$/i, /^log in$/i, /^next$/i]) {
     const btn = page.getByRole('button', { name }).first();
-    if ((await btn.count()) && (await btn.isVisible().catch(() => false))) {
-      await btn.click();
+    if (await isInteractable(btn)) {
+      await clickLikeHuman(page, btn);
       return;
     }
   }
+  throw new Error('No active submit button found on the current login step.');
+}
+
+/**
+ * Clicks with a cursor that travels there first.
+ *
+ * `locator.click()` teleports the pointer to the target and fires, leaving no
+ * `mousemove` trail. Castle collects pointer paths, so an otherwise clean
+ * session still stands out if every click arrives from nowhere.
+ */
+async function clickLikeHuman(page: Page, locator: Locator): Promise<void> {
+  const box = await locator.boundingBox().catch(() => null);
+  if (!box) {
+    await locator.click();
+    return;
+  }
+  const x = box.x + box.width * (0.35 + Math.random() * 0.3);
+  const y = box.y + box.height * (0.35 + Math.random() * 0.3);
+  await page.mouse.move(x, y, { steps: 12 + Math.floor(Math.random() * 12) });
+  await pause(60, 180);
+  await page.mouse.click(x, y);
 }
 
 async function dismissCookieBanner(page: Page): Promise<void> {
@@ -204,18 +318,38 @@ async function dismissCookieBanner(page: Page): Promise<void> {
     const btn = page.getByRole('button', { name }).first();
     if ((await btn.count()) && (await btn.isVisible().catch(() => false))) {
       await btn.click().catch(() => {});
-      await page.waitForTimeout(500);
+      await pause(400, 900);
       return;
     }
   }
 }
 
-async function firstVisible(page: Page, selectors: string[], ms: number): Promise<Locator | null> {
+/**
+ * True when the element can actually receive input.
+ *
+ * Visibility alone is not enough on this page. Both login steps are present in
+ * the DOM at once and the inactive one is marked `inert` — a subtree that
+ * renders normally, and so reports as visible, but ignores pointer and keyboard
+ * events. `closest` covers the element itself as well as any inert ancestor.
+ */
+async function isInteractable(locator: Locator): Promise<boolean> {
+  if (!(await locator.count())) return false;
+  if (!(await locator.isVisible().catch(() => false))) return false;
+  // Typed loosely: the project's tsconfig has no DOM lib, and this runs in the
+  // browser rather than in Node.
+  return locator.evaluate((el: any) => !el.closest('[inert]')).catch(() => false);
+}
+
+async function firstInteractable(
+  page: Page,
+  selectors: string[],
+  ms: number
+): Promise<Locator | null> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     for (const sel of selectors) {
       const loc = page.locator(sel).first();
-      if ((await loc.count()) && (await loc.isVisible().catch(() => false))) return loc;
+      if (await isInteractable(loc)) return loc;
     }
     await page.waitForTimeout(250);
   }
@@ -223,10 +357,10 @@ async function firstVisible(page: Page, selectors: string[], ms: number): Promis
 }
 
 async function handleChallenge(page: Page, options: BrowserLoginOptions): Promise<void> {
-  const field = await firstVisible(
+  const field = await firstInteractable(
     page,
     ['input[data-testid="ocfEnterTextTextInput"]', 'input[name="text"]', 'input[inputmode="numeric"]'],
-    6000
+    8000
   );
   if (!field) return; // no challenge
 
@@ -234,7 +368,13 @@ async function handleChallenge(page: Page, options: BrowserLoginOptions): Promis
   if (options.totpSecret) {
     code = await totpNow(options.totpSecret);
   } else if (options.onVerificationCode) {
-    const label = (await page.locator('span, div').filter({ hasText: /code|verification/i }).first().textContent().catch(() => null)) ?? 'Enter the verification code';
+    const label =
+      (await page
+        .locator('span, div')
+        .filter({ hasText: /code|verification/i })
+        .first()
+        .textContent()
+        .catch(() => null)) ?? 'Enter the verification code';
     code = await options.onVerificationCode(label.trim());
   } else {
     throw new Error(
@@ -242,7 +382,8 @@ async function handleChallenge(page: Page, options: BrowserLoginOptions): Promis
     );
   }
 
-  await field.fill(code);
+  await typeLikeHuman(field, code);
+  await pause(300, 700);
   await clickContinue(page);
 }
 

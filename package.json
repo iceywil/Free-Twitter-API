@@ -1,6 +1,6 @@
 {
   "name": "free-twitter-api",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Free Twitter API for Twitter in Typescript",
   "license": "MIT",
   "type": "module",

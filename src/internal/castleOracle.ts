@@ -44,14 +44,19 @@ const MINT_SCRIPT = `(async () => {
 
   // The Castle module registers with webpack only once the login bundle has
   // finished loading, which on a slow or proxied connection lands well after
-  // domcontentloaded. A fixed wait raced it — "module with configure() not
-  // found" was the bundle simply not being there yet — so this polls for the
-  // chunk, the require and the module in turn, up to ~20s.
+  // domcontentloaded. So this polls for the chunk, the require and the module
+  // in turn, and — just as important — tells apart the two ways it can fail:
+  // a page that never became the login SPA at all (a challenge, a block, a
+  // rate-limit interstitial: no webpack chunk ever appears) from the real
+  // "the bundle loaded but has no configure() module" (x.com changed it).
   const deadline = Date.now() + 20000;
+
+  let sawChunk = false;
 
   const findModule = () => {
     const chunk = window.webpackChunk_twitter_responsive_web;
     if (!chunk) return null;
+    sawChunk = true;
     let require;
     try { chunk.push([[Symbol('ftapi-castle')], {}, (r) => { require = r; }]); } catch (e) { return null; }
     if (!require || !require.m) return null;
@@ -81,7 +86,17 @@ const MINT_SCRIPT = `(async () => {
       if (mod && pk) break;
       await sleep(500);
     }
-    if (!mod) throw new Error('castle: module with configure() not found');
+    if (!mod) {
+      // The distinction that turns a dead end into a diagnosis. No chunk after
+      // 20s means x.com never served the login app — almost always a block, a
+      // challenge, or a rate limit on the IP or the account.
+      const title = (document.title || '').slice(0, 80);
+      throw new Error(
+        sawChunk
+          ? 'castle: login bundle loaded but exposes no configure() module'
+          : 'castle: x.com never loaded the login app (blocked, challenged, or rate limited) — title: ' + title
+      );
+    }
     if (!pk) throw new Error('castle: publishable key not found on page');
     window.__ftapiCastle = await mod.configure({ pk });
   }

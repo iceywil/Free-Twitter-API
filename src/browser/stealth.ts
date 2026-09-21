@@ -125,15 +125,32 @@ export function realChromeUserAgent(executablePath?: string): string {
  * patching a getter is itself detectable.
  */
 export function headlessOverrides(executablePath?: string): Record<string, unknown> {
+  /*
+   * The faked display has to match the platform the UA claims, or the two
+   * contradict each other and the contradiction is the tell.
+   *
+   * These values used to be a MacBook's Retina panel unconditionally — 1728x1117
+   * at scale 2 — which is consistent on macOS, where the UA also says Macintosh,
+   * and self-contradictory on Linux, where the UA says `X11; Linux x86_64` while
+   * the screen insists on an Apple Retina display. x.com's device assessment
+   * refuses that mismatch with "We've temporarily limited your login" on the
+   * first attempt — a Linux/Docker-only failure that never reproduces on a Mac
+   * dev box, because there the two happen to agree. So the display follows the
+   * platform: a Retina Mac on darwin, an ordinary 1080p panel at scale 1 (the
+   * commonest desktop in the world) on Linux and Windows.
+   */
+  const mac = platform() === 'darwin';
+  const screen = mac ? { width: 1728, height: 1117 } : { width: 1920, height: 1080 };
+  const viewport = mac ? { width: 1200, height: 816 } : { width: 1280, height: 720 };
+  const deviceScaleFactor = mac ? 2 : 1;
+  const windowArg = mac ? '--window-size=1200,880' : '--window-size=1280,800';
   return {
     headless: true,
     userAgent: realChromeUserAgent(executablePath),
-    // A window smaller than the screen, as a real one is — and the Retina
-    // scale factor the Apple GPU string implies.
-    screen: { width: 1728, height: 1117 },
-    viewport: { width: 1200, height: 816 },
-    deviceScaleFactor: 2,
-    args: [...STEALTH_ARGS, '--window-size=1200,880'],
+    screen,
+    viewport,
+    deviceScaleFactor,
+    args: [...STEALTH_ARGS, windowArg],
   };
 }
 

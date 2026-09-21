@@ -1,6 +1,6 @@
 # Free-Twitter-API
 
-![Repo views](https://visitor-badge.laobi.icu/badge?page_id=iceywil.Free-Twitter-API)
+![Repo views](https://komarev.com/ghpvc/?username=iceywil-Free-Twitter-API&label=Repo%20views&color=1d9bf0&style=flat)
 
 Free Twitter API for Twitter in Typescript. It speaks the same internal GraphQL
 and v1.1 endpoints the web app does — no developer account, no API key. Once you

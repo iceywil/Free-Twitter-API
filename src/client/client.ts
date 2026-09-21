@@ -526,6 +526,16 @@ export class Client {
       totpSecret: options.totpSecret,
       headless: options.headless,
       profileDir: options.profileDir,
+      /*
+       * The client's proxy, which this step used to drop.
+       *
+       * The hybrid strategy passed it to the Castle oracle and this one did
+       * not, so a login that fell through to the full browser went out from
+       * the host's own address — creating the session from one IP and then
+       * using it from another, which is the single correlation a per-account
+       * proxy exists to prevent.
+       */
+      proxy: this.proxy ?? undefined,
       onVerificationCode: (prompt: string) => this.promptFn(prompt),
     });
     return result.cookies;

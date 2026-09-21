@@ -40,25 +40,48 @@ export interface BrowserCastleOracleOptions {
 // app's own webpack runtime and mints a fresh token — the same module x.com uses,
 // so no assumptions about a global being exposed.
 const MINT_SCRIPT = `(async () => {
-  const chunk = window.webpackChunk_twitter_responsive_web;
-  if (!chunk) throw new Error('castle: no webpack chunk on page');
-  let require;
-  chunk.push([[Symbol('ftapi-castle')], {}, (r) => { require = r; }]);
-  if (!require || !require.m) throw new Error('castle: webpack require unavailable');
-  if (!window.__ftapiCastle) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // The Castle module registers with webpack only once the login bundle has
+  // finished loading, which on a slow or proxied connection lands well after
+  // domcontentloaded. A fixed wait raced it — "module with configure() not
+  // found" was the bundle simply not being there yet — so this polls for the
+  // chunk, the require and the module in turn, up to ~20s.
+  const deadline = Date.now() + 20000;
+
+  const findModule = () => {
+    const chunk = window.webpackChunk_twitter_responsive_web;
+    if (!chunk) return null;
+    let require;
+    try { chunk.push([[Symbol('ftapi-castle')], {}, (r) => { require = r; }]); } catch (e) { return null; }
+    if (!require || !require.m) return null;
     let mod = null;
     for (const id of Object.keys(require.m)) {
       try {
         const m = require(id);
         const api = m && (m.default || m);
         if (api && typeof api.configure === 'function' && typeof api.createRequestToken !== 'undefined') {
-          mod = api; break;
+          return api;
         }
         if (api && typeof api.configure === 'function') { mod = mod || api; }
       } catch (e) { /* skip modules that throw on load */ }
     }
+    return mod;
+  };
+
+  const publishableKey = () =>
+    (document.documentElement.innerHTML.match(/"responsive_web_castle_public_key"\\s*:\\s*\\{[^}]*?"value"\\s*:\\s*"([^"]+)"/) || [])[1];
+
+  if (!window.__ftapiCastle) {
+    let mod = null;
+    let pk = null;
+    while (Date.now() < deadline) {
+      mod = mod || findModule();
+      pk = pk || publishableKey();
+      if (mod && pk) break;
+      await sleep(500);
+    }
     if (!mod) throw new Error('castle: module with configure() not found');
-    const pk = (document.documentElement.innerHTML.match(/"responsive_web_castle_public_key"\\s*:\\s*\\{[^}]*?"value"\\s*:\\s*"([^"]+)"/) || [])[1];
     if (!pk) throw new Error('castle: publishable key not found on page');
     window.__ftapiCastle = await mod.configure({ pk });
   }

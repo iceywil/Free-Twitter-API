@@ -1,5 +1,7 @@
 # Free-Twitter-API
 
+![Repo views](https://visitor-badge.laobi.icu/badge?page_id=iceywil.Free-Twitter-API)
+
 Free Twitter API for Twitter in Typescript. It speaks the same internal GraphQL
 and v1.1 endpoints the web app does — no developer account, no API key. Once you
 have a session, everything runs as plain HTTP from Node; obtaining that session
@@ -41,18 +43,54 @@ npm install && npm run build && npm test
 
 ## Quick start
 
+`client.login()` **is** the sign-in — it authenticates an existing X account
+(the library never creates accounts). There are two ways to get a session:
+sign in with credentials, or import one you already have.
+
+### Sign in with credentials
+
 ```ts
 import { Client } from 'free-twitter-api';
 
-const client = new Client({ language: 'en-US' });
-
-await client.login({
-  authInfo1: 'your_username',
-  authInfo2: 'your_email@example.com',
-  password: 'your_password',
-  cookiesFile: 'cookies.json', // reused on later runs, skipping the login flow
+const client = new Client({
+  language: 'en-US',
+  // Called only for an interactive email/SMS code when no `totpSecret` is set:
+  prompt: async (message) => '123456',
 });
 
+await client.login({
+  authInfo1: 'your_username',          // username, email, or phone
+  authInfo2: 'your_email@example.com', // optional second identifier (recommended)
+  password: 'your_password',
+  totpSecret: 'BASE32SECRET',          // 2FA authenticator secret (omit if none)
+  cookiesFile: 'cookies.json',         // reused on later runs, skipping login entirely
+});
+```
+
+`login()` defaults to `strategy: 'hybrid'`, so it needs the optional
+`playwright` dependency the first time (until `cookiesFile` exists). 2FA is
+handled automatically from `totpSecret`; for email/SMS codes, supply the
+`prompt` callback instead. See [Login](#login) for the full field list and the
+other strategies.
+
+### Or import a session you already have
+
+No `playwright`, no login flow — load an exported cookie jar or a bulk-account
+record directly:
+
+```ts
+import { Client, parseAccountRecord, accountSessionCookies } from 'free-twitter-api';
+
+const client = new Client({ language: 'en-US' });
+
+await client.loadCookies('cookies.json');          // a saved jar, or…
+// const rec = parseAccountRecord(line);            // user:pass:totp:email:emailpw:token:base64(cookies)
+// client.setCookies(accountSessionCookies(rec)!);  // …a provider record's live session
+```
+
+### Then use the API
+
+```ts
 const me = await client.user();
 console.log(`@${me.screenName}`);
 

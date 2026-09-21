@@ -204,16 +204,18 @@ Both are covered by `tests/nativeLogin.test.ts`.
 await client.login({
   authInfo1: 'username',
   password: '...',
-  strategy: 'auto',    // default: native first, browser only if native is refused
+  strategy: 'hybrid',  // default
   headless: true,      // forwarded to the browser leg
 });
 ```
 
-- `'auto'` — try the browserless flow; on refusal, fall back to a real browser.
-  `playwright` is imported dynamically, so a caller whose native login succeeds
-  never loads it, and it stays a genuinely optional dependency.
-- `'native'` — never launch a browser; throw if refused.
-- `'browser'` — skip native entirely.
+- `'hybrid'` (default) — mint the Castle token in a real headless browser, run
+  every HTTP request natively. `playwright` is imported dynamically, so a caller
+  who loads a cached session never loads it, and it stays optional.
+- `'auto'` — hybrid, then fall back to a full browser login for flows hybrid
+  cannot drive; does not attempt the fully-native flow.
+- `'native'` — never launch a browser; throw if refused (currently refused).
+- `'browser'` — drive the whole login form in a real browser.
 
 Verified end to end today:
 
@@ -464,8 +466,9 @@ Fully browserless login still requires closing the encrypted-token gap
   rest. Authenticates end to end. The lightest working path.
 - **Browser** (`strategy: 'browser'`): the full-form fallback, most proven.
 
-`strategy: 'auto'` (the default) runs hybrid → browser and stops at the first
-that works. It deliberately skips the fully-native step: x.com reliably refuses
+`strategy: 'hybrid'` is the default. `strategy: 'auto'` runs hybrid → browser
+and stops at the first that works, for callers who want the full-browser
+fallback. Both deliberately skip the fully-native step: x.com reliably refuses
 the sandbox token, so attempting it first would spend a doomed request and erode
 the IP's standing before every login. `strategy: 'native'` remains available for
 anyone experimenting with the browserless path.

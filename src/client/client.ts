@@ -114,14 +114,14 @@ export interface LoginOptions {
   /**
    * How to obtain the session.
    *
-   * - `'auto'` (default) runs the hybrid flow, then a full browser login,
-   *   stopping at the first that works. It does not attempt the fully-native
-   *   flow, which x.com reliably refuses. The optional `playwright` dependency
-   *   is loaded only when login actually runs (a cached `cookiesFile` skips it).
-   * - `'hybrid'` runs every HTTP request from Node, but mints each Castle token
-   *   in a real (headless) browser — the browser does nothing but mint. A
-   *   browser-minted token is accepted where a sandbox one is not, so this is
-   *   the lightest path that works end to end. Needs `playwright`.
+   * - `'hybrid'` (default) runs every HTTP request from Node, but mints each
+   *   Castle token in a real (headless) browser — the browser does nothing but
+   *   mint. A browser-minted token is accepted where a sandbox one is not, so
+   *   this is the lightest path that works end to end. Needs `playwright`
+   *   (loaded only when login actually runs; a cached `cookiesFile` skips it).
+   * - `'auto'` runs hybrid, then falls back to a full browser login for flows
+   *   hybrid cannot drive (e.g. an interactive challenge), stopping at the
+   *   first that works. It does not attempt the fully-native flow.
    * - `'browser'` drives the whole login form in a real browser. Needs
    *   `playwright`.
    * - `'native'` never launches a browser. Currently refused by x.com (the
@@ -368,7 +368,7 @@ export class Client {
       return undefined;
     }
 
-    const strategy = options.strategy ?? 'auto';
+    const strategy = options.strategy ?? 'hybrid';
 
     const finish = async (cookies: Record<string, any>): Promise<Record<string, any>> => {
       this.setCookies(cookies, true);
@@ -378,16 +378,13 @@ export class Client {
       return cookies;
     };
 
-    // Each step in the `auto` chain is tried in turn; a caller who names a
-    // strategy gets exactly that one.
-    //
-    // `auto` deliberately skips the fully-native step: x.com reliably refuses
-    // the sandbox-minted token, so trying it first would spend a doomed
-    // device-assessment request (and erode the IP's standing) before every
-    // login. Hybrid mints the token in a real browser — which is what makes it
-    // accepted — and full browser is the fallback for flows hybrid cannot drive
-    // (e.g. an interactive challenge). `strategy: 'native'` stays available for
-    // anyone who wants the browserless attempt regardless.
+    // Hybrid is the default: it mints the Castle token in a real browser (which
+    // is what makes the token accepted) and runs every request natively. The
+    // other strategies are opt-in. `auto` additionally falls back to the full
+    // browser for flows hybrid cannot drive, e.g. an interactive challenge; it
+    // still skips the fully-native step because x.com reliably refuses the
+    // sandbox-minted token, so leading with it only spends a doomed request and
+    // erodes the IP's standing. Each step in a chain is tried in turn.
     const chain: Array<'native' | 'hybrid' | 'browser'> =
       strategy === 'auto' ? ['hybrid', 'browser'] : [strategy];
 

@@ -129,11 +129,11 @@ await client.login({
 });
 ```
 
-`login()` defaults to `strategy: 'auto'`, which mints x.com's Castle device
+`login()` defaults to `strategy: 'hybrid'`, which mints x.com's Castle device
 token in a real (headless) browser and then runs every request — `begin_login`,
 `login_enter_password`, the 2FA challenge — natively from Node. A cached
 `cookiesFile` skips the whole thing. See
-[When login gets blocked](#when-login-gets-blocked) for the strategy details.
+[When login gets blocked](#when-login-gets-blocked) for the other strategies.
 
 ### Importing a ready session
 
@@ -172,17 +172,17 @@ token it mints in a sandbox is judged weaker than a real browser's.
 await client.login({
   authInfo1: 'username',
   password: 'password',
-  strategy: 'auto',   // hybrid → browser, first that works (default)
+  strategy: 'hybrid',   // default
 });
 ```
 
-- `'auto'` (default) — runs `hybrid`, then falls back to `browser`. It does not
-  attempt `native`, which x.com reliably refuses. `playwright` is loaded only
-  when login actually runs (a cached `cookiesFile` skips it entirely).
-- `'hybrid'` — a headless browser mints only the Castle token; every request of
-  the login and all API traffic afterwards run natively from Node. The browser
-  is reduced to a few seconds of token-minting. The lightest path that works.
-  Needs `playwright`.
+- `'hybrid'` (default) — a headless browser mints only the Castle token; every
+  request of the login and all API traffic afterwards run natively from Node.
+  The browser is reduced to a few seconds of token-minting. The lightest path
+  that works. Needs `playwright` (loaded only when login runs; a cached
+  `cookiesFile` skips it entirely).
+- `'auto'` — runs `hybrid`, then falls back to `browser` for flows hybrid
+  cannot drive (e.g. an interactive challenge). Does not attempt `native`.
 - `'browser'` — drives the whole login form in a real browser (most proven).
 - `'native'` — no browser at all. Currently refused by x.com: the token minted
   in Node carries fewer device signals than a real browser's. Kept for

@@ -150,6 +150,31 @@ export function headlessOverrides(executablePath?: string): Record<string, unkno
  * `viewport: null` is what lets `screen` report the real display; setting any
  * explicit viewport makes Chrome report that size as the screen.
  */
+/**
+ * Splits a proxy URL into the shape Playwright wants.
+ *
+ * Playwright does **not** read `user:pass@` credentials embedded in the proxy
+ * `server` string — it needs `username`/`password` as separate fields. Passing
+ * the whole `http://user:pass@host:port` URL as `server` therefore sends no
+ * auth, the proxy answers 407, and Chromium reports `ERR_INVALID_AUTH_CREDENTIALS`.
+ * (The Node HTTP client does not hit this: its proxy agents parse the embedded
+ * credentials, which is why native requests work on a URL the browser rejects.)
+ */
+export function playwrightProxy(url: string): { server: string; username?: string; password?: string } {
+  try {
+    const u = new URL(url);
+    const proxy: { server: string; username?: string; password?: string } = {
+      server: `${u.protocol}//${u.host}`,
+    };
+    if (u.username) proxy.username = decodeURIComponent(u.username);
+    if (u.password) proxy.password = decodeURIComponent(u.password);
+    return proxy;
+  } catch {
+    // Not a parseable URL (e.g. bare host:port) — hand it over unchanged.
+    return { server: url };
+  }
+}
+
 export function stealthContextOptions(options: StealthLaunchOptions = {}): Record<string, unknown> {
   const base = {
     headless: false,
@@ -158,7 +183,7 @@ export function stealthContextOptions(options: StealthLaunchOptions = {}): Recor
     locale: options.locale ?? 'en-US',
     args: [...STEALTH_ARGS, ...(options.args ?? [])],
     ignoreDefaultArgs: STEALTH_IGNORED_DEFAULT_ARGS,
-    ...(options.proxy ? { proxy: { server: options.proxy } } : {}),
+    ...(options.proxy ? { proxy: playwrightProxy(options.proxy) } : {}),
   };
   if (!options.headless) return base;
   const over = headlessOverrides(options.executablePath);

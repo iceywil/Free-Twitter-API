@@ -441,6 +441,15 @@ export class Client {
       const browserCookies = await oracle.cookies();
       this.setCookies(browserCookies, true);
 
+      // Adopt the token-minting browser's user agent for the rest of the
+      // session. The Castle token embeds that browser's platform, so the native
+      // requests carrying it must present the same UA (and the `sec-ch-ua`
+      // platform derived from it). Without this, a Linux box mints a Linux
+      // token but the client keeps its default macOS UA, and x.com refuses the
+      // mismatch with "We've temporarily limited your login" — even though the
+      // exact same code works on a macOS host where the two happen to agree.
+      if (oracle.userAgent) this.agent = oracle.userAgent;
+
       const nativeFlow = await NativeLoginFlow.create(this.http, {
         authInfo1: options.authInfo1,
         authInfo2: options.authInfo2,

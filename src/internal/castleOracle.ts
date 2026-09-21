@@ -116,6 +116,18 @@ export class BrowserCastleOracle implements CastleTokenSource {
   /** The guest token cookie (`gt`) the browser was issued, once started. */
   guestToken = '';
 
+  /**
+   * The real `navigator.userAgent` of the token-minting browser.
+   *
+   * The Castle token embeds this browser's platform, so the native requests
+   * that carry the token must present the *same* user agent — otherwise the
+   * token says one OS and the headers say another, and x.com refuses the login.
+   * On a Mac dev box the client's default UA happens to match; on a Linux
+   * server it does not, which is the whole reason a hybrid login can work in
+   * one place and be "temporarily limited" in another.
+   */
+  userAgent = '';
+
   private async ensureReady(): Promise<void> {
     if (this.ready) return this.ready;
     this.ready = (async () => {
@@ -142,6 +154,7 @@ export class BrowserCastleOracle implements CastleTokenSource {
       for (const c of await this.context.cookies()) {
         if (c.name === 'gt') this.guestToken = c.value;
       }
+      this.userAgent = String(await this.page.evaluate('navigator.userAgent'));
     })();
     return this.ready;
   }

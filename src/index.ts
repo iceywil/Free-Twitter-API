@@ -5,7 +5,7 @@
  *
  */
 
-export const VERSION = '1.0.4';
+export const VERSION = '1.0.5';
 
 // -- clients -----------------------------------------------------------------
 export { Client, type ClientOptions, type LoginOptions } from './client/client.js';

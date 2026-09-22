@@ -8,10 +8,6 @@ export const V11Endpoint = {
   ACCOUNT_LOGOUT: `https://api.${DOMAIN}/1.1/account/logout.json`,
   ONBOARDING_TASK: `https://api.${DOMAIN}/1.1/onboarding/task.json`,
   SETTINGS: `https://api.${DOMAIN}/1.1/account/settings.json`,
-  // Writing the screen name goes to the cookie host, like the other profile
-  // writes — the OAuth `api.` host answers a cookie session with code 34
-  // ("Sorry, that page does not exist"), which read as a broken rebrand.
-  ACCOUNT_SETTINGS_WRITE: `https://${DOMAIN}/i/api/1.1/account/settings.json`,
   UPLOAD_MEDIA: `https://upload.${DOMAIN}/i/media/upload.json`,
   UPLOAD_MEDIA_2: `https://upload.${DOMAIN}/i/media/upload2.json`,
   CREATE_MEDIA_METADATA: `https://api.${DOMAIN}/1.1/media/metadata/create.json`,

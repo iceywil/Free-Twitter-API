@@ -134,7 +134,7 @@ export class V11Client {
 
   /** Changes the @handle (and other account settings) via settings.json. */
   updateSettings(fields: Record<string, string>) {
-    return this.base.post(V11Endpoint.SETTINGS, {
+    return this.base.post(V11Endpoint.ACCOUNT_SETTINGS_WRITE, {
       data: fields,
       headers: this.formHeaders,
     });

@@ -24,8 +24,64 @@ export interface TransactionManagerOptions {
   silent?: boolean;
 }
 
+/*
+ * The transaction generator's inputs — the logged-out home page markup, the
+ * `ondemand.s` bundle and the loading-animation SVG — are public and identical
+ * for every client, and `generateTransactionId` reads them without mutating.
+ * So the initialised generator is shared across every client in the process and
+ * refreshed only occasionally.
+ *
+ * This matters a lot in bulk: `init` downloads ~1.5 MB, and a client that
+ * initialised per instance re-downloaded it on *every* request. A run of tens
+ * of thousands of follows was therefore tens of GB of home-page re-fetches
+ * through residential proxies. Shared, it is one download per process per TTL.
+ */
+const SHARED_TTL_MS = 30 * 60 * 1000;
+let sharedTransaction: ClientTransaction | null = null;
+let sharedAt = 0;
+let sharedInit: Promise<ClientTransaction> | null = null;
+
+/**
+ * The shared, initialised generator — fetched once (through the first caller's
+ * session) and reused until it goes stale. Concurrent callers await the one
+ * in-flight init rather than each starting their own.
+ */
+async function getSharedTransaction(
+  session: HttpSession,
+  headers: Record<string, string>
+): Promise<ClientTransaction> {
+  if (sharedTransaction && Date.now() - sharedAt < SHARED_TTL_MS) {
+    return sharedTransaction;
+  }
+  if (!sharedInit) {
+    sharedInit = (async () => {
+      const tx = new ClientTransaction();
+      const cookiesBackup = { ...session.getCookies() };
+      try {
+        await tx.init(session, headers);
+      } finally {
+        // The home-page fetch touches the caller's jar; leave it as it was.
+        session.setCookies(cookiesBackup, true);
+      }
+      sharedTransaction = tx;
+      sharedAt = Date.now();
+      return tx;
+    })();
+    // Clear the in-flight handle whether it resolves or rejects, so a failed
+    // init does not wedge every later request.
+    void sharedInit.then(
+      () => {
+        sharedInit = null;
+      },
+      () => {
+        sharedInit = null;
+      }
+    );
+  }
+  return sharedInit;
+}
+
 export class TransactionManager {
-  readonly transaction = new ClientTransaction();
   private disabled = false;
   private warned = false;
 
@@ -34,6 +90,14 @@ export class TransactionManager {
   /** Whether the header is currently being omitted. */
   get unavailable(): boolean {
     return this.disabled;
+  }
+
+  /**
+   * The shared generator. Initialised lazily on the first request, so before
+   * then this is a fresh, empty instance rather than null.
+   */
+  get transaction(): ClientTransaction {
+    return sharedTransaction ?? new ClientTransaction();
   }
 
   /**
@@ -49,27 +113,22 @@ export class TransactionManager {
   ): Promise<void> {
     if (this.disabled) return;
 
-    if (!this.transaction.homePageResponse) {
-      const cookiesBackup = { ...session.getCookies() };
+    let transaction: ClientTransaction;
+    try {
       const ctHeaders = {
         'Accept-Language': `${context.language},${context.language.split('-')[0]};q=0.9`,
         'Cache-Control': 'no-cache',
         Referer: `https://${DOMAIN}`,
         'User-Agent': context.userAgent,
       };
-
-      try {
-        await this.transaction.init(session, ctHeaders);
-      } catch (error) {
-        this.fail(error);
-        return;
-      } finally {
-        session.setCookies(cookiesBackup, true);
-      }
+      transaction = await getSharedTransaction(session, ctHeaders);
+    } catch (error) {
+      this.fail(error);
+      return;
     }
 
     try {
-      headers['X-Client-Transaction-Id'] = this.transaction.generateTransactionId(
+      headers['X-Client-Transaction-Id'] = transaction.generateTransactionId(
         method,
         new URL(url).pathname
       );

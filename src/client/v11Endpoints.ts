@@ -54,4 +54,15 @@ export const V11Endpoint = {
   UPDATE_PROFILE_IMAGE: `https://${DOMAIN}/i/api/1.1/account/update_profile_image.json`,
   UPDATE_PROFILE_BANNER: `https://${DOMAIN}/i/api/1.1/account/update_profile_banner.json`,
   REMOVE_PROFILE_BANNER: `https://${DOMAIN}/i/api/1.1/account/remove_profile_banner.json`,
+  /*
+   * Client telemetry ("scribes"), including the impression events the backend
+   * aggregates into a tweet's public view count.
+   *
+   * The name is misleading on purpose: this route used to be, and elsewhere
+   * still is, the onboarding flow. The current web client (`m5`) batches its
+   * `client_event` scribes here as a form body — `debug=true&log=<json array>` —
+   * rather than to the old `jot/client_event.json`. Nothing in the URL says
+   * "client_event"; only the body does.
+   */
+  CLIENT_EVENT: `https://${DOMAIN}/i/api/1.1/flow/timeline.json`,
 } as const;

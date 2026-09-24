@@ -315,3 +315,13 @@ export const EXPLORE_FEATURES: Record<string, boolean> = {
   "responsive_web_grok_community_note_auto_translation_is_enabled": true,
   "responsive_web_enhance_cards_enabled": false
 };
+
+/**
+ * The client identifier the web client stamps on its telemetry.
+ *
+ * `m5` is the current x.com web client; `CLIENT_APP_ID` is the app registration
+ * it scribes under. Both appear verbatim in every `client_event` it sends.
+ */
+export const SCRIBE_CLIENT = "m5";
+
+export const CLIENT_APP_ID = "3033300";

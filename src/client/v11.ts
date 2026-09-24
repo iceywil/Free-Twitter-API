@@ -40,6 +40,45 @@ const FRIENDSHIP_FLAGS = {
   skip_status: 1,
 } as const;
 
+/** The `event_namespace` of a scribe: what was shown, where, and what happened. */
+export interface ClientEventNamespace {
+  page?: string;
+  section?: string;
+  component?: string;
+  element?: string;
+  action: string;
+  /** The client identifier. The current web client is `m5`. */
+  client?: string;
+}
+
+/** How long an item stayed on screen, in epoch milliseconds. */
+export interface ImpressionDetails {
+  visibility_start: number;
+  visibility_end: number;
+}
+
+/** One entity a scribe is about — a tweet, a user, a card. */
+export interface ClientEventItem {
+  /** `0` is a tweet. */
+  item_type?: number;
+  id?: string;
+  author_id?: string;
+  impression_details?: ImpressionDetails;
+  first_impression?: boolean;
+  [key: string]: unknown;
+}
+
+/** A single `client_event` scribe, as the web client batches them. */
+export interface ClientEvent {
+  _category_?: string;
+  format_version?: number;
+  triggered_on?: number;
+  client_app_id?: string;
+  event_namespace: ClientEventNamespace;
+  items?: ClientEventItem[];
+  [key: string]: unknown;
+}
+
 export class V11Client {
   constructor(private readonly base: V11Base) {}
 
@@ -539,5 +578,25 @@ export class V11Client {
 
   userState() {
     return this.base.get(V11Endpoint.USER_STATE, { headers: this.base.baseHeaders });
+  }
+
+  // -- telemetry -------------------------------------------------------------
+
+  /**
+   * Posts a batch of `client_event` scribes.
+   *
+   * There is no "register a view" endpoint. A view is an impression scribe:
+   * a `client_event` saying the tweet was on screen, with a dwell window, which
+   * the backend aggregates into the public view count. The batch is sent
+   * form-encoded as `debug=true&log=<url-encoded JSON array>`, which is why
+   * filtering traffic by URL never surfaces it — the route is
+   * `flow/timeline.json` and only the body mentions `client_event`.
+   */
+  clientEvent(events: ClientEvent[], debug = true) {
+    const body = `debug=${debug}&log=${encodeURIComponent(JSON.stringify(events))}`;
+    return this.base.post(V11Endpoint.CLIENT_EVENT, {
+      data: body,
+      headers: this.formHeaders,
+    });
   }
 }

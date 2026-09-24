@@ -15,7 +15,15 @@ export {
   type AccountRecord,
 } from './client/accountRecord.js';
 export { GQLClient, Endpoint, type ApiResult, type GQLBase } from './client/gql.js';
-export { V11Client, V11Endpoint, type V11Base } from './client/v11.js';
+export {
+  V11Client,
+  V11Endpoint,
+  type V11Base,
+  type ClientEvent,
+  type ClientEventItem,
+  type ClientEventNamespace,
+  type ImpressionDetails,
+} from './client/v11.js';
 export {
   GuestClient,
   GuestTweet,

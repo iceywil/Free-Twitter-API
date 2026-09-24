@@ -5,7 +5,7 @@ import { open } from 'node:fs/promises';
 import { createInterface } from 'node:readline/promises';
 import { TOTP } from 'otpauth';
 import type { CaptchaSolver } from '../captcha/base.js';
-import { DEFAULT_USER_AGENT, DOMAIN, TOKEN } from '../constants.js';
+import { CLIENT_APP_ID, DEFAULT_USER_AGENT, DOMAIN, SCRIBE_CLIENT, TOKEN } from '../constants.js';
 import {
   AccountLocked,
   AccountSuspended,
@@ -66,7 +66,7 @@ import {
 } from '../utils.js';
 import { GQLClient, type ApiResult } from './gql.js';
 import { NativeLoginFlow } from './nativeLogin.js';
-import { V11Client, V11Endpoint } from './v11.js';
+import { V11Client, V11Endpoint, type ClientEvent } from './v11.js';
 
 export interface ClientOptions {
   /** The language code to use in API requests. */
@@ -1688,6 +1688,116 @@ export class Client {
   /** Removes a like from a tweet. */
   async unfavoriteTweet(tweetId: string): Promise<HttpResponse> {
     const [, response] = await this.gql.unfavoriteTweet(tweetId);
+    return response;
+  }
+
+  /**
+   * Registers a view (an impression) on a tweet.
+   *
+   * X exposes no "add a view" endpoint. The public view count is aggregated by
+   * the backend from client telemetry: the web client reports that a tweet
+   * entered the viewport (`stream/top/show`) and, when it scrolls away or the
+   * page unloads, how long it stayed on screen (`stream/linger/results`, with
+   * an `impression_details` visibility window and `first_impression`). Those
+   * scribes are what this method sends, batched into a single
+   * `client_event` POST.
+   *
+   * For a video tweet the counted event is a different one: the MRC viewable
+   * video view (`video_player/video_mrc_view`), which the player fires once the
+   * video has been playing and visible long enough to qualify. Pass
+   * `video: true` to send it alongside the linger events; the helper on
+   * {@link Tweet.view} sets it automatically when the tweet carries a video.
+   *
+   * `dwellMs` is the dwell window reported to the backend — how long the tweet
+   * is claimed to have been on screen. The method does not wait that long; it
+   * backdates `visibility_start` and returns immediately.
+   *
+   * @example
+   * await client.viewTweet('1234567890', { authorId: '111', dwellMs: 5000 });
+   */
+  async viewTweet(
+    tweetId: string,
+    options: {
+      /** The tweet author's user ID, as the real client reports it. */
+      authorId?: string | null;
+      /** The dwell window, in milliseconds. */
+      dwellMs?: number;
+      /** Whether this is the first time the viewer sees the tweet. */
+      firstImpression?: boolean;
+      /** Also send the MRC viewable-video-view event, for a video tweet. */
+      video?: boolean;
+      /** The page the tweet was seen on. `tweet` is the detail page. */
+      page?: string;
+      /** End of the visibility window, in epoch milliseconds. Defaults to now. */
+      visibilityEnd?: number;
+    } = {}
+  ): Promise<HttpResponse> {
+    const {
+      authorId = null,
+      dwellMs = 3000,
+      firstImpression = true,
+      video = false,
+      page = 'tweet',
+      visibilityEnd = Date.now(),
+    } = options;
+
+    const visibilityStart = visibilityEnd - dwellMs;
+    const item: Record<string, unknown> = { item_type: 0, id: tweetId };
+    if (authorId != null) item.author_id = authorId;
+
+    const scribe = (
+      element: string,
+      action: string,
+      extra: Record<string, unknown> = {}
+    ): ClientEvent => ({
+      _category_: 'client_event',
+      format_version: 2,
+      triggered_on: visibilityEnd,
+      client_app_id: CLIENT_APP_ID,
+      event_namespace: {
+        page,
+        section: '',
+        component: 'stream',
+        element,
+        action,
+        client: SCRIBE_CLIENT,
+      },
+      items: [{ ...item, ...extra }],
+    });
+
+    const events: ClientEvent[] = [
+      scribe('top', 'show'),
+      scribe('linger', 'results', {
+        impression_details: {
+          visibility_start: visibilityStart,
+          visibility_end: visibilityEnd,
+        },
+        first_impression: firstImpression,
+      }),
+    ];
+
+    if (video) {
+      events.push(
+        scribe('video_player', 'video_mrc_view', {
+          impression_details: {
+            visibility_start: visibilityStart,
+            visibility_end: visibilityEnd,
+          },
+        })
+      );
+    }
+
+    return this.clientEvent(events);
+  }
+
+  /**
+   * Sends raw `client_event` scribes.
+   *
+   * The escape hatch behind {@link viewTweet}, for telemetry this library does
+   * not model. See {@link V11Client.clientEvent} for the transport.
+   */
+  async clientEvent(events: ClientEvent[]): Promise<HttpResponse> {
+    const [, response] = await this.v11.clientEvent(events);
     return response;
   }
 

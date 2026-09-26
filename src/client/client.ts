@@ -67,6 +67,24 @@ import {
 import { GQLClient, type ApiResult } from './gql.js';
 import { NativeLoginFlow } from './nativeLogin.js';
 import { V11Client, V11Endpoint, type ClientEvent } from './v11.js';
+import type { AppealOptions, AppealResult } from '../browser/appeal.js';
+import type { BrowserViewOptions, BrowserViewResult } from '../browser/view.js';
+
+/** What a profile lookup says about an account's availability. */
+export interface AccountStatus {
+  /** The screen name or id that was checked. */
+  account: string;
+  /** False when no such account exists. */
+  exists: boolean;
+  /** Whether other users can see the profile. */
+  available: boolean;
+  /** True only for a suspension, not for other kinds of unavailability. */
+  suspended: boolean;
+  /** X's machine-readable reason, e.g. `Suspended`. Null when available. */
+  reason: string | null;
+  /** X's human-readable message, e.g. `User is suspended`. */
+  message: string | null;
+}
 
 export interface ClientOptions {
   /** The language code to use in API requests. */
@@ -1255,6 +1273,110 @@ export class Client {
     return new User(this, userData);
   }
 
+  /**
+   * Reports whether an account is suspended, without throwing.
+   *
+   * A suspended account answers the profile lookup with
+   * `__typename: "UserUnavailable"` and `reason: "Suspended"` instead of a
+   * user. {@link getUserByScreenName} turns that into a thrown
+   * {@link UserUnavailable}; this returns it as data, so it can be checked in
+   * a condition.
+   *
+   * **A suspended session cannot see this about itself.** Looking up your own
+   * handle from your own cookies returns an ordinary `User` even while the
+   * account is suspended, and `settings.json`, `Viewer` and the timeline all
+   * keep working too — verified against a suspended account. So to check an
+   * account of yours, call this from a *different* logged-in session, which is
+   * what everybody else sees. Guest (logged-out) lookups are refused with
+   * `403`, so they are not an option.
+   *
+   * @example
+   * const checker = new Client();
+   * await checker.loadCookies('other-account.json');
+   * const status = await checker.getAccountStatus('some_handle');
+   * if (status.suspended) console.log(status.message); // 'User is suspended'
+   */
+  async getAccountStatus(screenNameOrId: string): Promise<AccountStatus> {
+    const byId = /^\d+$/.test(screenNameOrId);
+    const [response] = byId
+      ? await this.gql.userByRestId(screenNameOrId)
+      : await this.gql.userByScreenName(screenNameOrId);
+
+    const result = response?.data?.user?.result;
+    if (!result) {
+      return {
+        account: screenNameOrId,
+        exists: false,
+        available: false,
+        suspended: false,
+        reason: null,
+        message: null,
+      };
+    }
+    if (result.__typename === 'UserUnavailable') {
+      return {
+        account: screenNameOrId,
+        exists: true,
+        available: false,
+        // `reason` is the machine-readable one; other values include
+        // 'Protected' and withheld-country cases, which are not suspensions.
+        suspended: result.reason === 'Suspended',
+        reason: result.reason ?? null,
+        message: result.message ?? null,
+      };
+    }
+    return {
+      account: screenNameOrId,
+      exists: true,
+      available: true,
+      suspended: false,
+      reason: null,
+      message: null,
+    };
+  }
+
+  /**
+   * Whether the account is suspended. Shorthand for
+   * {@link getAccountStatus}, and subject to the same caveat: ask from a
+   * session other than the account being checked.
+   */
+  async isSuspended(screenNameOrId: string): Promise<boolean> {
+    return (await this.getAccountStatus(screenNameOrId)).suspended;
+  }
+
+  /**
+   * Files an appeal against this account's suspension.
+   *
+   * Fully automated: pass the appeal text and it fills the form, clears the
+   * challenge and submits. `screenName` defaults to this session's own handle,
+   * which `settings.json` still reports while suspended.
+   *
+   * It drives a hidden browser rather than posting directly, because the form
+   * is gated by Cloudflare Turnstile and a token cannot be minted from Node.
+   * See {@link appealAccount}. Requires the optional `playwright` dependency.
+   *
+   * @example
+   * const result = await client.appealAccount({
+   *   email: 'me@example.com',
+   *   text: 'My account was suspended on ... I believe this was a mistake because ...',
+   * });
+   * console.log(result.submitted ? 'filed' : result.error);
+   */
+  async appealAccount(
+    options: Omit<AppealOptions, 'cookies'>
+  ): Promise<AppealResult> {
+    const { appealAccount } = await import('../browser/appeal.js');
+
+    let { screenName } = options;
+    if (!screenName) {
+      // Works on a suspended account: settings.json keeps answering normally.
+      const [settings] = await this.v11.settings();
+      screenName = settings?.screen_name;
+    }
+
+    return appealAccount({ ...options, screenName, cookies: this.getCookies() });
+  }
+
   /** Fetches a user by ID. */
   async getUserById(userId: string): Promise<User> {
     const [response] = await this.gql.userByRestId(userId);
@@ -1692,102 +1814,51 @@ export class Client {
   }
 
   /**
-   * Registers a view (an impression) on a tweet.
+   * Registers a view on a tweet, by opening it in a real browser.
    *
-   * X exposes no "add a view" endpoint. The public view count is aggregated by
-   * the backend from client telemetry: the web client reports that a tweet
-   * entered the viewport (`stream/top/show`) and, when it scrolls away or the
-   * page unloads, how long it stayed on screen (`stream/linger/results`, with
-   * an `impression_details` visibility window and `first_impression`). Those
-   * scribes are what this method sends, batched into a single
-   * `client_event` POST.
+   * There is no way to do this over HTTP. The web client reports impressions
+   * as `client_event` scribes, and that wire format is known exactly (see
+   * `docs/view-telemetry.md`) — but reproducing it from Node does not move the
+   * counter. Measured against a live tweet with untouched controls: three
+   * sessions POSTing the batch, every POST confirmed `200`, scored `+0`, while
+   * the same three sessions opening the tweet in Chrome scored `+3`, one each.
+   * Setting the permalink `Referer`, fetching `TweetDetail` from the sending
+   * session first, and echoing back the server-issued `sortIndex` all changed
+   * nothing. So this drives the browser instead.
    *
-   * For a video tweet the counted event is a different one: the MRC viewable
-   * video view (`video_player/video_mrc_view`), which the player fires once the
-   * video has been playing and visible long enough to qualify. Pass
-   * `video: true` to send it alongside the linger events; the helper on
-   * {@link Tweet.view} sets it automatically when the tweet carries a video.
+   * That makes it slow and heavy compared with the rest of this client: it
+   * launches Chrome and genuinely waits out `dwellMs` per tweet. To view
+   * several tweets, pass them to {@link viewTweets} so they share one browser.
    *
-   * `dwellMs` is the dwell window reported to the backend — how long the tweet
-   * is claimed to have been on screen. The method does not wait that long; it
-   * backdates `visibility_start` and returns immediately.
+   * Requires the optional `playwright` dependency and a logged-in session.
    *
    * @example
-   * await client.viewTweet('1234567890', { authorId: '111', dwellMs: 5000 });
+   * await client.viewTweet('1234567890');
    */
   async viewTweet(
     tweetId: string,
-    options: {
-      /** The tweet author's user ID, as the real client reports it. */
-      authorId?: string | null;
-      /** The dwell window, in milliseconds. */
-      dwellMs?: number;
-      /** Whether this is the first time the viewer sees the tweet. */
-      firstImpression?: boolean;
-      /** Also send the MRC viewable-video-view event, for a video tweet. */
-      video?: boolean;
-      /** The page the tweet was seen on. `tweet` is the detail page. */
-      page?: string;
-      /** End of the visibility window, in epoch milliseconds. Defaults to now. */
-      visibilityEnd?: number;
-    } = {}
-  ): Promise<HttpResponse> {
-    const {
-      authorId = null,
-      dwellMs = 3000,
-      firstImpression = true,
-      video = false,
-      page = 'tweet',
-      visibilityEnd = Date.now(),
-    } = options;
+    options: Omit<BrowserViewOptions, 'cookies' | 'tweets'> = {}
+  ): Promise<BrowserViewResult> {
+    const [result] = await this.viewTweets([tweetId], options);
+    return result;
+  }
 
-    const visibilityStart = visibilityEnd - dwellMs;
-    const item: Record<string, unknown> = { item_type: 0, id: tweetId };
-    if (authorId != null) item.author_id = authorId;
-
-    const scribe = (
-      element: string,
-      action: string,
-      extra: Record<string, unknown> = {}
-    ): ClientEvent => ({
-      _category_: 'client_event',
-      format_version: 2,
-      triggered_on: visibilityEnd,
-      client_app_id: CLIENT_APP_ID,
-      event_namespace: {
-        page,
-        section: '',
-        component: 'stream',
-        element,
-        action,
-        client: SCRIBE_CLIENT,
-      },
-      items: [{ ...item, ...extra }],
-    });
-
-    const events: ClientEvent[] = [
-      scribe('top', 'show'),
-      scribe('linger', 'results', {
-        impression_details: {
-          visibility_start: visibilityStart,
-          visibility_end: visibilityEnd,
-        },
-        first_impression: firstImpression,
-      }),
-    ];
-
-    if (video) {
-      events.push(
-        scribe('video_player', 'video_mrc_view', {
-          impression_details: {
-            visibility_start: visibilityStart,
-            visibility_end: visibilityEnd,
-          },
-        })
-      );
-    }
-
-    return this.clientEvent(events);
+  /**
+   * Registers a view on each tweet, sharing one browser across the list.
+   *
+   * Each tweet is opened, dwelt on, then left — leaving is what makes the
+   * client flush the impression — so expect roughly `dwellMs` per tweet.
+   *
+   * @example
+   * const results = await client.viewTweets(['123', '456'], { dwellMs: 32000 });
+   * const counted = results.filter((r) => r.viewed).length;
+   */
+  async viewTweets(
+    tweetIds: string[],
+    options: Omit<BrowserViewOptions, 'cookies' | 'tweets'> = {}
+  ): Promise<BrowserViewResult[]> {
+    const { browserViewTweets } = await import('../browser/view.js');
+    return browserViewTweets({ ...options, cookies: this.getCookies(), tweets: tweetIds });
   }
 
   /**

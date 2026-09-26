@@ -43,9 +43,12 @@ scripts/.browser-signals.json
 scripts/.starve.json
 scripts/.session-newacct.json
 scripts/.castle-probes.json
+scripts/.view-capture.json
+scripts/.tmp-*
 
 # loose dev helper (feature lives in src/browser/chromeCookies.ts)
 scripts/get-chrome-cookies.ts
 
 # superseded by deviceProfile.ts (regenerate via scripts/dbg-harvest-profile.ts)
 src/internal/deviceProfile.json
+session-*.json

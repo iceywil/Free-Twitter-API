@@ -150,8 +150,32 @@ export function headlessOverrides(executablePath?: string): Record<string, unkno
     screen,
     viewport,
     deviceScaleFactor,
-    args: [...STEALTH_ARGS, windowArg],
+    args: [...STEALTH_ARGS, windowArg, ...gpuArgs()],
   };
+}
+
+/**
+ * GPU flags for the token-minting browser.
+ *
+ * The WebGL renderer string Castle reads is whatever GPU actually rendered the
+ * frame — headless Chrome uses real hardware. On a Mac that is the Apple GPU via
+ * Metal, which is coherent and unremarkable, so we leave it untouched. In a
+ * GPU-less Linux container (Railway, most Docker hosts) Chrome falls back to
+ * Mesa's `llvmpipe`, and a bare `llvmpipe` renderer with no windowing system is
+ * one of the strongest headless-bot tells there is: almost no real human browses
+ * on a software rasterizer that identifies itself that way.
+ *
+ * Forcing ANGLE + SwiftShader swaps that for a `Google SwiftShader` / ANGLE
+ * renderer string, which is the same software-GL path a large population of real
+ * Chrome installs use (VMs, remote desktops, GPU-blocklisted drivers). It is
+ * common and coherent rather than conspicuous. On a host that *does* have a real
+ * GPU (e.g. a Fly.io GPU machine) you would drop this so the genuine renderer
+ * shows through — set `FTAPI_NO_SWIFTSHADER=1` to opt out.
+ */
+function gpuArgs(): string[] {
+  if (platform() === 'darwin') return [];
+  if (process.env.FTAPI_NO_SWIFTSHADER) return [];
+  return ['--use-gl=angle', '--use-angle=swiftshader'];
 }
 
 /**
@@ -195,7 +219,10 @@ export function playwrightProxy(url: string): { server: string; username?: strin
 export function stealthContextOptions(options: StealthLaunchOptions = {}): Record<string, unknown> {
   const base = {
     headless: false,
-    channel: 'chrome',
+    // Real Google Chrome by default; FTAPI_BROWSER_CHANNEL lets a host without
+    // it (e.g. arm64 Linux, which Google ships no Chrome for) fall back to
+    // Playwright's bundled Chromium for local reproduction.
+    ...(process.env.FTAPI_BROWSER_CHANNEL === 'chromium' ? {} : { channel: 'chrome' }),
     viewport: null,
     locale: options.locale ?? 'en-US',
     args: [...STEALTH_ARGS, ...(options.args ?? [])],
@@ -248,4 +275,66 @@ function keyFor(char: string): string {
 export function pause(minMs: number, maxMs: number): Promise<void> {
   const ms = minMs + Math.random() * (maxMs - minMs);
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * An init script that makes a GPU-less Linux server present as the MacBook in
+ * DEFAULT_DEVICE_PROFILE — run before any page script, in every frame.
+ *
+ * The hybrid mint runs in a headless browser on the deploy, which has no GPU:
+ * WebGL falls back to SwiftShader and `hardwareConcurrency` reports the host's
+ * 48 server cores, both of which mark the device as a datacenter machine and
+ * draw "We've temporarily limited your login" on the first attempt. The same
+ * code on a Mac dev box signs in, because there the fingerprint is a real
+ * consumer machine. Proven side by side on one exit IP: Mac in, Linux refused.
+ *
+ * So the JS-visible device — the surface Castle reads to derive its token — is
+ * overridden to one internally consistent Apple profile: the UA and platform,
+ * the core and memory counts, the Retina screen, and above all the WebGL vendor
+ * and renderer strings that otherwise say SwiftShader out loud.
+ */
+export function deviceSpoofScript(profile: Record<string, unknown>): string {
+  return `(() => {
+    const P = ${JSON.stringify(profile)};
+    const def = (obj, prop, val) => { try { Object.defineProperty(obj, prop, { get: () => val, configurable: true }); } catch (e) {} };
+    const nav = Object.getPrototypeOf(navigator);
+    def(nav, 'userAgent', P.userAgent);
+    def(nav, 'appVersion', P.appVersion);
+    def(nav, 'platform', P.platform);
+    def(nav, 'vendor', P.vendor);
+    def(nav, 'hardwareConcurrency', P.hardwareConcurrency);
+    def(nav, 'deviceMemory', P.deviceMemory);
+    def(nav, 'maxTouchPoints', P.maxTouchPoints || 0);
+    if (P.uaData && navigator.userAgentData) {
+      const uad = navigator.userAgentData;
+      def(Object.getPrototypeOf(uad), 'platform', P.uaData.platform);
+      def(Object.getPrototypeOf(uad), 'brands', P.uaData.brands);
+      def(Object.getPrototypeOf(uad), 'mobile', !!P.uaData.mobile);
+    }
+    if (P.screen) {
+      for (const k of ['width','height','availWidth','availHeight','colorDepth','pixelDepth']) {
+        if (P.screen[k] != null) def(screen, k, P.screen[k]);
+      }
+    }
+    if (P.devicePixelRatio) def(window, 'devicePixelRatio', P.devicePixelRatio);
+    // WebGL vendor/renderer: the loudest server tell. 37445/37446 are the
+    // UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL enums the debug extension
+    // exposes; override getParameter to answer with the profile's Apple strings.
+    const params = (P.webgl && P.webgl.params) || {};
+    // The identity strings Castle reads: UNMASKED vendor/renderer (37445/37446)
+    // and the masked VENDOR/RENDERER/VERSION (7936/7937/7938). Overriding these
+    // replaces "SwiftShader" with the profile's Apple GPU; the numeric caps are
+    // left real to avoid type-shape tells (Int32Array vs Array).
+    const ids = [37445, 37446, 7936, 7937, 7938];
+    const patch = (proto) => {
+      if (!proto) return;
+      const orig = proto.getParameter;
+      proto.getParameter = function (p) {
+        if (ids.indexOf(p) !== -1 && params[String(p)] != null) return params[String(p)];
+        return orig.call(this, p);
+      };
+    };
+    if (typeof WebGLRenderingContext !== 'undefined') patch(WebGLRenderingContext.prototype);
+    if (typeof WebGL2RenderingContext !== 'undefined') patch(WebGL2RenderingContext.prototype);
+  })();`;
 }

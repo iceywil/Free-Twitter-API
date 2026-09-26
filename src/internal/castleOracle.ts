@@ -21,8 +21,10 @@ import {
   PROFILE_ROOT,
   profileDirFor,
   stealthContextOptions,
+  deviceSpoofScript,
 } from '../browser/stealth.js';
 import type { CastleTokenSource } from './castleSolver.js';
+import { DEFAULT_DEVICE_PROFILE } from './deviceProfile.js';
 
 export interface BrowserCastleOracleOptions {
   /** Run the token-minting browser headless. Defaults to true. */
@@ -103,6 +105,19 @@ const MINT_SCRIPT = `(async () => {
   return window.__ftapiCastle.createRequestToken();
 })()`;
 
+// Reads the WebGL renderer the way a fingerprinter does: the UNMASKED string
+// from WEBGL_debug_renderer_info, falling back to the masked RENDERER. Returns a
+// short tag on any failure rather than throwing, so it is safe as a diagnostic.
+const READ_WEBGL_RENDERER = `(() => {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if (!gl) return 'no-webgl';
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    return String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER));
+  } catch (e) { return 'err:' + (e && e.message); }
+})()`;
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type BrowserContext = any;
 
@@ -128,6 +143,23 @@ export class BrowserCastleOracle implements CastleTokenSource {
    */
   userAgent = '';
 
+  /**
+   * The *true* WebGL renderer of the host, read before the device spoof is
+   * applied — the real GPU string x.com would see with no overrides. On a Mac
+   * this is the Apple GPU; in a GPU-less container it is `llvmpipe` (no GPU
+   * flags) or a `SwiftShader`/ANGLE string (with them). Captured only when
+   * `FTAPI_DEBUG_GPU` is set, so the normal path pays nothing.
+   */
+  rawWebglRenderer = '';
+
+  /**
+   * The WebGL renderer the page reports *after* the device spoof — i.e. what
+   * Castle's `getParameter(UNMASKED_RENDERER_WEBGL)` actually reads. Note this
+   * is only the string; the pixels a `readPixels` hash would see still come from
+   * {@link rawWebglRenderer}'s real backend, which is why the GPU flags matter.
+   */
+  webglRenderer = '';
+
   private async ensureReady(): Promise<void> {
     if (this.ready) return this.ready;
     this.ready = (async () => {
@@ -148,6 +180,19 @@ export class BrowserCastleOracle implements CastleTokenSource {
       } as any);
       this.page = this.context.pages()[0] ?? (await this.context.newPage());
       this.page.setDefaultTimeout(this.options.timeout ?? 45_000);
+
+      // Before any spoof: read the host's true GPU string. This is the single
+      // most useful signal for diagnosing a "temporarily limited" on a deploy —
+      // it tells you whether the container is on `llvmpipe` (bare bot tell),
+      // SwiftShader (common, coherent) or a real GPU. Gated so it costs nothing
+      // in the normal path.
+      if (process.env.FTAPI_DEBUG_GPU) {
+        this.rawWebglRenderer = await this.page.evaluate(READ_WEBGL_RENDERER);
+      }
+
+      // Present a consistent consumer (Mac) device to Castle, so a GPU-less
+      // Linux server does not leak SwiftShader + 48 cores and get limited.
+      await this.context.addInitScript(deviceSpoofScript(DEFAULT_DEVICE_PROFILE as unknown as Record<string, unknown>));
       await this.page.goto('https://x.com/i/flow/login', { waitUntil: 'domcontentloaded' });
       await this.page.waitForTimeout(2500);
 
@@ -155,6 +200,16 @@ export class BrowserCastleOracle implements CastleTokenSource {
         if (c.name === 'gt') this.guestToken = c.value;
       }
       this.userAgent = String(await this.page.evaluate('navigator.userAgent'));
+
+      if (process.env.FTAPI_DEBUG_GPU) {
+        this.webglRenderer = await this.page.evaluate(READ_WEBGL_RENDERER);
+        // eslint-disable-next-line no-console
+        console.error(
+          `[ftapi gpu] true renderer: ${this.rawWebglRenderer || '(unknown)'}\n` +
+            `[ftapi gpu] renderer Castle sees (after spoof): ${this.webglRenderer || '(unknown)'}\n` +
+            `[ftapi gpu] userAgent: ${this.userAgent}`
+        );
+      }
     })();
     return this.ready;
   }

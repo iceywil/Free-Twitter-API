@@ -1,4 +1,5 @@
 
+import type { BrowserViewOptions, BrowserViewResult } from '../browser/view.js';
 import type { Client } from '../client/client.js';
 import type { HttpResponse } from '../internal/http.js';
 import { findDict, timestampToDate, type Result } from '../utils.js';
@@ -264,24 +265,16 @@ export class Tweet {
   }
 
   /**
-   * Registers a view on the tweet.
+   * Registers a view on the tweet, by opening it in a real browser.
    *
-   * Sends the impression scribes the web client sends when a tweet is on
-   * screen. `video` defaults to whether the tweet carries a video, because a
-   * video tweet's views are counted from the MRC viewable-video-view event
-   * rather than the dwell one. See {@link Client.viewTweet}.
+   * Slow by nature — it waits out the dwell window on a real page, because
+   * posting the impression from Node does not count. See
+   * {@link Client.viewTweet}.
    */
   async view(
-    options: { dwellMs?: number; firstImpression?: boolean; video?: boolean } = {}
-  ): Promise<HttpResponse> {
-    const hasVideo = this.media.some(
-      (item) => item.type === 'video' || item.type === 'animated_gif'
-    );
-    return this.client.viewTweet(this.id, {
-      authorId: this.user?.id ?? null,
-      video: hasVideo,
-      ...options,
-    });
+    options: Omit<BrowserViewOptions, 'cookies' | 'tweets'> = {}
+  ): Promise<BrowserViewResult> {
+    return this.client.viewTweet(this.id, options);
   }
 
   async retweet(): Promise<HttpResponse> {

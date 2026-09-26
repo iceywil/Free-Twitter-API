@@ -8,7 +8,12 @@
 export const VERSION = '1.0.5';
 
 // -- clients -----------------------------------------------------------------
-export { Client, type ClientOptions, type LoginOptions } from './client/client.js';
+export {
+  Client,
+  type AccountStatus,
+  type ClientOptions,
+  type LoginOptions,
+} from './client/client.js';
 export {
   parseAccountRecord,
   accountSessionCookies,

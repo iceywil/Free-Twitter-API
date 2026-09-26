@@ -64,3 +64,28 @@ describe('Client.getAccountStatus', () => {
     await expect(clientReturning({ __typename: 'User' }).isSuspended('x')).resolves.toBe(false);
   });
 });
+
+describe('Client.getOwnAccountState', () => {
+  const clientWithState = (userState: unknown) => {
+    const client = new Client();
+    (client as any).v11 = { userState: vi.fn().mockResolvedValue([{ userState }]) };
+    return client;
+  };
+
+  it('reports a suspended session', async () => {
+    const client = clientWithState('suspended');
+    expect(await client.getOwnAccountState()).toEqual({ state: 'suspended', suspended: true });
+    expect(await client.isOwnAccountSuspended()).toBe(true);
+  });
+
+  it('reports a normal session', async () => {
+    const client = clientWithState('normal');
+    expect(await client.getOwnAccountState()).toEqual({ state: 'normal', suspended: false });
+    expect(await client.isOwnAccountSuspended()).toBe(false);
+  });
+
+  it('does not guess when the field is missing', async () => {
+    const client = clientWithState(undefined);
+    expect(await client.getOwnAccountState()).toEqual({ state: null, suspended: false });
+  });
+});

@@ -2,8 +2,47 @@
 
 ## Detecting a suspension
 
-A suspended account answers the profile lookup with a tombstone instead of a
-user:
+There are **two** kinds, and they look different:
+
+| | public profile | `user_state.json` |
+| --- | --- | --- |
+| full suspension | tombstoned (`UserUnavailable` / `Suspended`) | `suspended` |
+| read-only / limited | still visible, looks ordinary | `suspended` |
+
+So no single check covers both, and which one you want depends on whose account
+you are asking about.
+
+### Your own account — `isOwnAccountSuspended()`
+
+Use this for "am I suspended?". It reads the help-center endpoint the web
+client itself calls:
+
+```
+GET https://api.x.com/help-center/forms/api/prod/user_state.json
+  -> {"userState":"normal"}  |  {"userState":"suspended"}
+```
+
+`Client.getOwnAccountState()` returns the raw value plus a boolean.
+
+Measured across seven sessions, this was the only check that matched reality
+for all of them — including one account reported `suspended` here whose profile
+was still publicly visible, i.e. a read-only suspension that the public lookup
+called healthy.
+
+A suspended session also sees it in other places: a `403` with
+`code: 64, "Your account is suspended and is not permitted to access this
+feature"`, a `suspended-prompt` entry in the home timeline, and the banner
+"Your account is suspended … permanently in read-only mode" on x.com. But
+`user_state.json` is the cheap, unambiguous one.
+
+Note what a suspended session can still do: `Viewer`, `settings.json` (still
+reporting the right `screen_name`), the home timeline and a lookup of its own
+handle all keep answering normally. Do not read those working as evidence of
+health.
+
+### Somebody else's account — `isSuspended(handle)`
+
+A fully suspended account answers the profile lookup with a tombstone:
 
 ```json
 {"data":{"user":{"result":{
@@ -13,35 +52,17 @@ user:
 }}}}
 ```
 
-`Client.getAccountStatus()` returns that as data and `Client.isSuspended()` as a
-boolean. `reason` is the field that matters: `UserUnavailable` also covers
-protected and withheld accounts, which are not suspensions.
+`Client.getAccountStatus()` returns that as data. `reason` is what matters:
+`UserUnavailable` also covers protected and withheld accounts, which are not
+suspensions.
 
-### A suspended session cannot see this about itself
+Two limits worth knowing:
 
-This is the part that surprises. Checked against a genuinely suspended account,
-from its own cookies:
-
-| what | what it says |
-| --- | --- |
-| `graphql/Viewer` | normal payload, no suspension anywhere |
-| `1.1/account/settings.json` | normal, still reports the right `screen_name` |
-| `UserByScreenName` on **its own** handle | an ordinary `User` |
-| the home timeline | loads, returns tweets |
-| `help-center/forms/api/prod/user_state.json` | `{"userState":"suspended"}` — **but it says that for healthy accounts too**, so it is not a signal |
-
-Meanwhile the same handle, looked up from *another* logged-in session, returns
-`UserUnavailable` / `Suspended` immediately. Guest (logged-out) lookups are
-refused with `403`.
-
-So an account cannot self-diagnose over the API. To check one of yours, ask
-from a different session:
-
-```ts
-const checker = new Client();
-await checker.loadCookies('some-other-account.json');
-await checker.isSuspended('the_suspended_handle');   // true
-```
+- **It misses read-only suspensions**, whose profiles stay public.
+- **It cannot be pointed at yourself.** A session looking up its own handle
+  gets an ordinary `User` back even while suspended. Guest (logged-out) lookups
+  are refused with `403`. Ask from a different session, or use
+  `isOwnAccountSuspended()`.
 
 ## Appealing
 

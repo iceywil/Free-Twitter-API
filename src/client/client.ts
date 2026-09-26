@@ -86,6 +86,13 @@ export interface AccountStatus {
   message: string | null;
 }
 
+/** The state of the session's own account, from the help-center endpoint. */
+export interface OwnAccountState {
+  /** Raw value, e.g. `normal` or `suspended`. Null if the field was absent. */
+  state: string | null;
+  suspended: boolean;
+}
+
 export interface ClientOptions {
   /** The language code to use in API requests. */
   language?: string;
@@ -1339,9 +1346,43 @@ export class Client {
    * Whether the account is suspended. Shorthand for
    * {@link getAccountStatus}, and subject to the same caveat: ask from a
    * session other than the account being checked.
+   *
+   * To ask about *this* session's own account, use
+   * {@link isOwnAccountSuspended} — this one answers `false` for a session
+   * checking itself, and for a read-only suspension whose profile is still
+   * public.
    */
   async isSuspended(screenNameOrId: string): Promise<boolean> {
     return (await this.getAccountStatus(screenNameOrId)).suspended;
+  }
+
+  /**
+   * The state of *this session's own* account.
+   *
+   * This is the one to use for "am I suspended?". The public profile lookup
+   * behind {@link getAccountStatus} cannot answer it: a session looking itself
+   * up gets an ordinary `User` back, and a read-only suspension leaves the
+   * profile publicly visible anyway, so it would report `false` while the
+   * account is plainly suspended.
+   *
+   * The signal is the help-center's own `user_state.json`, which the web
+   * client calls and which returns `normal` or `suspended`. Verified across
+   * seven sessions, including one suspended-but-still-publicly-visible account
+   * that the public lookup called healthy.
+   *
+   * @example
+   * const state = await client.getOwnAccountState();
+   * if (state.suspended) await client.appealAccount({ ... });
+   */
+  async getOwnAccountState(): Promise<OwnAccountState> {
+    const [response] = await this.v11.userState();
+    const state = response?.userState ?? null;
+    return { state, suspended: state === 'suspended' };
+  }
+
+  /** Whether this session's own account is suspended. */
+  async isOwnAccountSuspended(): Promise<boolean> {
+    return (await this.getOwnAccountState()).suspended;
   }
 
   /**

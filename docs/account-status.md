@@ -110,3 +110,59 @@ intermittently refuses a browser outright with "This browser no longer supports
 this form". When that happens and `headless` was not set explicitly,
 `appealAccount` retries headed once; a run that never rendered never submitted,
 so the retry is safe.
+
+## Unlocking a locked account
+
+A lock is a third state, distinct from the two suspensions above: X answers API
+calls with "Your account is locked. Visit https://x.com/account/access to unlock
+it." The unlock flow is a short server-rendered state machine —
+`Start` → challenge → `Continue to X` — and finishes by redirecting to `/`.
+
+Two ways to drive it:
+
+| | how | needs |
+| --- | --- | --- |
+| `Client.unlock()` | HTTP, existing | a paid captcha service (Capsolver) for the Arkose FunCaptcha |
+| `Client.unlockWithBrowser()` | Playwright | nothing, *if* the challenge clears by itself |
+
+`unlockWithBrowser()` lands on the site first, walks the buttons, and applies
+the rotated cookies (unlocking changes `ct0`) to the client on success.
+
+### The Cloudflare gate, measured
+
+`/account/access` is protected far more heavily than the rest of the site, and
+from this project it could not be reached at all:
+
+```
+GET https://x.com/account/access
+  -> 403, redirected to ...?__cf_chl_rt_tk=...
+     <title>Just a moment...</title>
+     "Performing security verification"
+     input[name="cf-turnstile-response"] present, never filled
+```
+
+Tested with the same logged-in session, in the same tab, immediately after
+`x.com/home` had loaded cleanly with no challenge whatsoever:
+
+| browser | result |
+| --- | --- |
+| stealth headless | blocked, never leaves the first phase |
+| stealth headed (real Chrome) | blocked for 120 s, no token issued |
+| plain Chrome headed | blocked |
+| plain bundled Chromium headed | blocked |
+
+So the blocker is the page, not the automation: nothing here ever reached the
+unlock form, and the flow past it is therefore **written but unverified**. The
+gate is IP- and fingerprint-sensitive, and this address had spent a day driving
+heavy automation, so a clean address may well pass — `proxy` is there for that.
+When it does block, `unlockWithBrowser()` returns that diagnosis explicitly
+rather than timing out vaguely.
+
+### A detection note
+
+Cloudflare's wording changes between phases ("Performing security verification"
+becomes "Verifying you are human"), so matching on text alone reports the gate
+as gone while it is still up. Detect it structurally instead, on
+`input[name="cf-turnstile-response"]`. Likewise, do not read "no challenge text"
+as success: mid-redirect the document is briefly blank, which looks identical.
+Wait for a positive signal — the form, or a changed URL.

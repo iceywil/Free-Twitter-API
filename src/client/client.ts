@@ -68,6 +68,7 @@ import { GQLClient, type ApiResult } from './gql.js';
 import { NativeLoginFlow } from './nativeLogin.js';
 import { V11Client, V11Endpoint, type ClientEvent } from './v11.js';
 import type { AppealOptions, AppealResult } from '../browser/appeal.js';
+import type { BrowserUnlockOptions, BrowserUnlockResult } from '../browser/unlock.js';
 import type { BrowserViewOptions, BrowserViewResult } from '../browser/view.js';
 
 /** What a profile lookup says about an account's availability. */
@@ -575,6 +576,34 @@ export class Client {
   async logout(): Promise<HttpResponse> {
     const [, response] = await this.v11.accountLogout();
     return response;
+  }
+
+  /**
+   * Unlocks the account by driving `x.com/account/access` in a browser.
+   *
+   * The alternative to {@link unlock}, which needs a paid captcha service. A
+   * challenge that clears by itself — as soft locks often do — needs no solver
+   * here.
+   *
+   * On success the session cookies are rotated and applied to this client, so
+   * there is nothing to wire up afterwards.
+   *
+   * Be aware that `/account/access` sits behind a much stricter Cloudflare gate
+   * than the rest of the site, and that gate is IP-sensitive: pass `proxy` to
+   * come from a cleaner address if it refuses. See {@link browserUnlock}.
+   *
+   * @example
+   * const result = await client.unlockWithBrowser();
+   * if (!result.unlocked) console.error(result.error);
+   */
+  async unlockWithBrowser(
+    options: Omit<BrowserUnlockOptions, 'cookies'> = {}
+  ): Promise<BrowserUnlockResult> {
+    const { browserUnlock } = await import('../browser/unlock.js');
+    const result = await browserUnlock({ ...options, cookies: this.getCookies() });
+    // Unlocking rotates ct0; keep this client on the working session.
+    if (result.unlocked) this.setCookies(result.cookies, true);
+    return result;
   }
 
   /** Unlocks the account using the configured captcha solver. */

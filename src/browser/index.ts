@@ -12,6 +12,13 @@ export {
 } from './appeal.js';
 
 export {
+  browserUnlock,
+  ACCESS_URL,
+  type BrowserUnlockOptions,
+  type BrowserUnlockResult,
+} from './unlock.js';
+
+export {
   browserViewTweets,
   type BrowserViewOptions,
   type BrowserViewResult,
